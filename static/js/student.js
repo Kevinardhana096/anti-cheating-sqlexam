@@ -60,15 +60,52 @@ function initCodeMirror() {
         extraKeys: {
             "Ctrl-Space": "autocomplete",
             "Ctrl-Enter": () => runQuery(),
-            "Cmd-Enter": () => runQuery()
+            "Cmd-Enter": () => runQuery(),
+            "Shift-Ctrl-Enter": () => runQuery(true),
+            "Shift-Cmd-Enter": () => runQuery(true)
         }
     });
 
-    // Anti-Paste Protection on Editor
+    // Update Run button label dynamically when selection changes (Run Partial)
+    editor.on("cursorActivity", () => {
+        const sel = editor.getSelection().trim();
+        const runText = document.getElementById("btn-run-text");
+        const selBadge = document.getElementById("selection-indicator");
+        if (runText) {
+            runText.textContent = sel ? "Run Selection" : "Run Query";
+        }
+        if (selBadge) {
+            selBadge.style.display = sel ? "inline-flex" : "none";
+        }
+    });
+
+    // Smart Internal Copy-Paste Handler: Allows internal copy-paste, blocks external clipboard
     editor.on("paste", (cm, e) => {
-        e.preventDefault();
-        showToast("Paste dilarang pada ujian ini! Silakan ketik query secara mandiri.", "danger");
-        logCheatingAction("paste_attempt", "Mencoba melakukan paste pada editor SQL");
+        let pastedText = "";
+        let isInternalHeader = false;
+
+        if (e.clipboardData) {
+            pastedText = e.clipboardData.getData("text/plain") || "";
+            isInternalHeader = (e.clipboardData.getData("application/x-ide-internal") === "true");
+        } else if (window.clipboardData) {
+            pastedText = window.clipboardData.getData("Text") || "";
+        }
+
+        const normInternal = _normalizeClipboard(_internalClipboardText);
+        const normPasted = _normalizeClipboard(pastedText);
+        const isInternal = isInternalHeader || (normInternal && normPasted && normInternal === normPasted);
+
+        if (isInternal) {
+            // Internal copy-paste is ALLOWED
+            e.preventDefault();
+            cm.replaceSelection(pastedText);
+            showToast("Menempelkan teks internal IDE.", "info");
+        } else {
+            // External paste from outside the browser / exam window is BLOCKED
+            e.preventDefault();
+            showToast("Paste dari luar jendela ujian dilarang! Silakan ketik query secara mandiri.", "danger");
+            logCheatingAction("paste_attempt", "Mencoba melakukan paste teks dari luar aplikasi ujian");
+        }
     });
 
     // Auto-trigger completion on typing words
@@ -128,14 +165,86 @@ function applyGlobalTheme(theme) {
 
 
 // ==============================================================================
-// 2. Anti-Cheating & Security Controls
+// 2. Anti-Cheating & Security Controls (Smart Internal Clipboard)
 // ==============================================================================
+let _internalClipboardText = "";
+let _internalClipboardTimestamp = 0;
+
+function _normalizeClipboard(str) {
+    return (str || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function _registerInternalCopy(text) {
+    if (typeof text === "string" && text.length > 0) {
+        _internalClipboardText = text;
+        _internalClipboardTimestamp = Date.now();
+    }
+}
+
 function setupAntiCheat() {
-    // Intercept general clipboard paste on page
+    // Track internal copy/cut across the IDE (editor, question descriptions, ERD, result table)
+    document.addEventListener("copy", (e) => {
+        let sel = "";
+        if (editor && editor.hasFocus() && editor.somethingSelected()) {
+            sel = editor.getSelection();
+        } else {
+            const s = window.getSelection();
+            sel = s ? s.toString() : "";
+        }
+        if (sel) {
+            _registerInternalCopy(sel);
+            if (e.clipboardData) {
+                try {
+                    e.clipboardData.setData("text/plain", sel);
+                    e.clipboardData.setData("application/x-ide-internal", "true");
+                    e.preventDefault();
+                } catch (err) {}
+            }
+        }
+    });
+
+    document.addEventListener("cut", (e) => {
+        let sel = "";
+        if (editor && editor.hasFocus() && editor.somethingSelected()) {
+            sel = editor.getSelection();
+        } else {
+            const s = window.getSelection();
+            sel = s ? s.toString() : "";
+        }
+        if (sel) {
+            _registerInternalCopy(sel);
+            if (e.clipboardData) {
+                try {
+                    e.clipboardData.setData("text/plain", sel);
+                    e.clipboardData.setData("application/x-ide-internal", "true");
+                    e.preventDefault();
+                } catch (err) {}
+            }
+        }
+    });
+
+    // Intercept general clipboard paste on page (outside CodeMirror)
     document.addEventListener("paste", (e) => {
-        e.preventDefault();
-        showToast("Paste dilarang pada sistem ujian!", "danger");
-        logCheatingAction("paste_attempt", "Mencoba paste di luar editor");
+        if (e.target && (e.target.closest(".CodeMirror") || e.target.id === "sql-editor")) {
+            return; // Handled directly by CodeMirror paste handler
+        }
+
+        let pastedText = "";
+        let isInternalHeader = false;
+        if (e.clipboardData) {
+            pastedText = e.clipboardData.getData("text/plain") || "";
+            isInternalHeader = (e.clipboardData.getData("application/x-ide-internal") === "true");
+        }
+
+        const normInternal = _normalizeClipboard(_internalClipboardText);
+        const normPasted = _normalizeClipboard(pastedText);
+        const isInternal = isInternalHeader || (normInternal && normPasted && normInternal === normPasted);
+
+        if (!isInternal) {
+            e.preventDefault();
+            showToast("Paste dari luar dilarang pada sistem ujian!", "danger");
+            logCheatingAction("paste_attempt", "Mencoba paste di luar editor");
+        }
     });
 
     // Detect tab/window switches
@@ -369,10 +478,15 @@ function selectQuestion(idx) {
 // ==============================================================================
 // 5. Query Execution & Results Rendering
 // ==============================================================================
-async function runQuery() {
-    const query = editor.getValue().trim();
+async function runQuery(forcePartial = false) {
+    if (!editor) return;
+    const selection = editor.getSelection().trim();
+    const fullQuery = editor.getValue().trim();
+    const isPartial = (forcePartial && selection) || (selection.length > 0);
+    const query = isPartial ? selection : fullQuery;
+
     if (!query) {
-        showToast("Editor query masih kosong.", "warning");
+        showToast(isPartial ? "Bagian teks query yang diseleksi kosong." : "Editor query masih kosong.", "warning");
         return;
     }
 
@@ -384,10 +498,10 @@ async function runQuery() {
     outputContainer.innerHTML = `
         <div class="state-box">
             <div class="spinner"></div>
-            <p>Mengeksekusi query pada sandbox PostgreSQL...</p>
+            <p>Mengeksekusi ${isPartial ? "bagian query terpilih (Partial)" : "query"} pada sandbox PostgreSQL...</p>
         </div>
     `;
-    metaContainer.textContent = "Menjalankan...";
+    metaContainer.textContent = isPartial ? "Menjalankan (Partial)..." : "Menjalankan...";
 
     try {
         const res = await fetch("/api/student/run-query", {
@@ -403,15 +517,18 @@ async function runQuery() {
         
         if (data.success) {
             renderResultTable(data.columns, data.rows, data.row_count, data.is_truncated);
-            metaContainer.textContent = `${data.row_count} baris dikembalikan (${data.execution_time_ms} ms)`;
+            metaContainer.textContent = `${data.row_count} baris dikembalikan (${data.execution_time_ms} ms)${isPartial ? " • Run Partial" : ""}`;
+            if (isPartial) {
+                showToast(`Partial run berhasil (${data.row_count} baris).`, "info");
+            }
         } else {
             outputContainer.innerHTML = `
                 <div class="state-box-error">
-                    <strong>Error Eksekusi SQL:</strong><br>
+                    <strong>Error Eksekusi SQL${isPartial ? " (Partial Run)" : ""}:</strong><br>
                     ${escapeHtml(data.error || "Query gagal dieksekusi.")}
                 </div>
             `;
-            metaContainer.textContent = "Query Gagal";
+            metaContainer.textContent = isPartial ? "Query Partial Gagal" : "Query Gagal";
         }
     } catch (err) {
         outputContainer.innerHTML = `
@@ -752,9 +869,7 @@ function bindErdRelToggle() {
 // 8. Utilities
 // ==============================================================================
 function formatQuery() {
-    // Simple basic keyword uppercase formatting
     if (!editor) return;
-    let text = editor.getValue();
     const keywords = [
         "select", "from", "where", "group by", "order by", "having", 
         "inner join", "left join", "right join", "join", "on", 
@@ -762,11 +877,23 @@ function formatQuery() {
         "distinct", "limit", "offset", "and", "or", "in", "like", "between",
         "is null", "is not null", "asc", "desc"
     ];
-    keywords.forEach(kw => {
-        const reg = new RegExp(`\\b${kw}\\b`, "gi");
-        text = text.replace(reg, kw.toUpperCase());
-    });
-    editor.setValue(text);
+
+    function applyFormat(t) {
+        keywords.forEach(kw => {
+            const reg = new RegExp(`\\b${kw}\\b`, "gi");
+            t = t.replace(reg, kw.toUpperCase());
+        });
+        return t;
+    }
+
+    if (editor.somethingSelected()) {
+        const sel = editor.getSelection();
+        editor.replaceSelection(applyFormat(sel));
+        showToast("Format SQL diterapkan pada bagian yang diseleksi.", "info");
+    } else {
+        editor.setValue(applyFormat(editor.getValue()));
+        showToast("Format SQL diterapkan pada seluruh editor.", "info");
+    }
 }
 
 function showToast(message, type = "success") {

@@ -343,22 +343,27 @@
 
             <!-- Editor Actions Toolbar -->
             <div class="editor-toolbar">
-                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
                     <span style="font-weight: 600; font-size: 0.85rem; color: var(--text-main);">
                         SQL Editor
                     </span>
                     <span style="font-size: 0.75rem; color: var(--text-subtle);">
                         (PostgreSQL Sandbox - Read-Only)
                     </span>
+                    <span id="selection-indicator" style="display: none; align-items: center; gap: 0.35rem; font-size: 0.7rem; padding: 0.15rem 0.55rem; border-radius: 12px; background: color-mix(in srgb, var(--primary) 20%, transparent); color: var(--accent); font-weight: 600; border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);">
+                        <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block;"></span>
+                        Seleksi Aktif (Partial)
+                    </span>
                 </div>
                 <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
                     <button type="button" class="btn btn-secondary btn-sm" id="btn-format-sql"
-                        title="Rapikan kata kunci query">
+                        title="Rapikan kata kunci query (atau bagian yang diblok)">
                         Format SQL
                     </button>
                     <button type="button" class="btn btn-primary" id="btn-run-query"
-                        title="Jalankan query untuk melihat output (Ctrl+Enter)">
-                        Run Query
+                        title="Jalankan query (Ctrl+Enter). Jika ada teks yang diseleksi, hanya bagian tersebut yang dieksekusi.">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display: inline-block; vertical-align: middle; margin-right: 3px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        <span id="btn-run-text">Run Query</span>
                     </button>
                     <button type="button" class="btn btn-success" id="btn-submit-answer"
                         title="Simpan query ini sebagai jawaban resmi">
