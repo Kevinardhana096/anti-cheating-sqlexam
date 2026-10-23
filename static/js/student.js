@@ -806,17 +806,17 @@ function formatMarkdown(text) {
     return safe.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
 }
 
-// ==============================================================================
-// ERD Diagram — Canvas Renderer (Force-Directed Layout, Pan/Zoom)
+// ==========================================================================// ==============================================================================
+// ERD Diagram — Structured Matrix Layout & Visual Relations
 // ==============================================================================
 
-const ERD_TBL_W      = 215;
-const ERD_COL_H      = 21;
-const ERD_HDR_H      = 32;
-const ERD_PAD        = 8;
+const ERD_TBL_W      = 230;
+const ERD_COL_H      = 22;
+const ERD_HDR_H      = 34;
+const ERD_PAD        = 10;
 const ERD_PALETTE    = [
-    '#6366f1','#8b5cf6','#ec4899','#14b8a6','#f59e0b',
-    '#ef4444','#3b82f6','#10b981','#f97316','#06b6d4'
+    '#6366f1','#059669','#0284c7','#d97706','#8b5cf6',
+    '#0d9488','#ec4899','#f97316','#3b82f6','#10b981'
 ];
 
 let _dc = null;   // canvas
@@ -825,8 +825,25 @@ let _dn = [];     // nodes
 let _de = [];     // edges
 let _dt = {s:1, px:0, py:0}; // transform
 let _dDrag = false;
-let _dLast = {x:0,y:0};
+let _dLast = {x:0, y:0};
 let _dSelected = null; // highlighted table name
+let _draggedNode = null;
+let _dragOffset = {x:0, y:0};
+let _downPos = {x:0, y:0};
+
+function _getTableColor(table, index) {
+    const domainColors = {
+        offices:      '#6366f1', // Indigo - Organization Root
+        employees:    '#4f46e5', // Deep Indigo - Staff
+        customers:    '#059669', // Emerald - Clients
+        payments:     '#0d9488', // Teal - Payments & Billing
+        orders:       '#d97706', // Amber - Sales Orders
+        orderdetails: '#ea580c', // Orange - Order Line Items
+        products:     '#0284c7', // Sky Blue - Product Catalog
+        productlines: '#0891b2'  // Cyan - Product Categories
+    };
+    return domainColors[table] || ERD_PALETTE[index % ERD_PALETTE.length];
+}
 
 function openErdDiagram() {
     const modal = document.getElementById('erd-diagram-modal');
@@ -839,6 +856,8 @@ function closeErdDiagram() {
     const modal = document.getElementById('erd-diagram-modal');
     if (modal) modal.style.display = 'none';
     _dSelected = null;
+    _draggedNode = null;
+    _dDrag = false;
 }
 
 function _initDiagram() {
@@ -863,16 +882,17 @@ function _initDiagram() {
         return;
     }
 
-    // Build FK lookup
+    // Build FK lookup dictionary
     const fkCols = {};
-    rels.forEach(r => { fkCols[`${r.from_table}.${r.from_col}`] = true; });
+    rels.forEach(r => {
+        const fromColNorm = (r.from_col || '').toLowerCase().replace(/_/g, '');
+        fkCols[`${r.from_table}.${fromColNorm}`] = true;
+    });
 
     const tables = Object.keys(schema).sort();
-    const cols_n = Math.ceil(Math.sqrt(tables.length));
-    const spacingX = 280, spacingY = 320;
 
     tables.forEach((tbl, i) => {
-        const cols = schema[tbl];
+        const cols = schema[tbl] || [];
         const h = ERD_HDR_H + cols.length * ERD_COL_H + ERD_PAD;
         _dn.push({
             table: tbl,
@@ -880,76 +900,169 @@ function _initDiagram() {
             fkCols,
             w: ERD_TBL_W,
             h,
-            x: (i % cols_n) * spacingX + 50,
-            y: Math.floor(i / cols_n) * spacingY + 50,
-            vx: 0, vy: 0,
-            color: ERD_PALETTE[i % ERD_PALETTE.length]
+            x: 0,
+            y: 0,
+            color: _getTableColor(tbl, i)
         });
     });
 
-    _runLayout(320);
+    _applyStructuredLayout();
     _centerDiagram();
     _drawDiagram();
     _bindDiagramEvents();
 }
 
-function _runLayout(iter) {
-    const REP  = 20000;
-    const SLEN = 270;
-    const SK   = 0.18;
-    const DAMP = 0.82;
-    const ns   = _dn;
+function _applyStructuredLayout() {
+    const schema = _erdSchemaCache || {};
+    const rels   = _erdRelCache   || [];
+    const tables = Object.keys(schema);
+    if (!tables.length) return;
 
-    for (let it = 0; it < iter; it++) {
-        ns.forEach(n => { n.fx = 0; n.fy = 0; });
+    // Canonical 4x2 matrix layout for classicmodels:
+    // Row 0: offices (0,0)  <- employees (1,0)  <- customers (2,0)    <- payments (3,0)
+    // Row 1: productlines(0,1) <- products(1,1) <- orderdetails(2,1) -> orders(3,1)
+    // Note: orderdetails links products (left) and orders (right). orders links customers (up-left).
+    const cmKeys = ['offices', 'employees', 'customers', 'orders', 'orderdetails', 'products', 'productlines', 'payments'];
+    const matchCount = cmKeys.filter(t => schema[t]).length;
+    const isClassicModels = matchCount >= 4;
 
-        // Repulsion
-        for (let i = 0; i < ns.length; i++) {
-            for (let j = i + 1; j < ns.length; j++) {
-                const a = ns[i], b = ns[j];
-                const dx = (b.x + b.w/2) - (a.x + a.w/2);
-                const dy = (b.y + b.h/2) - (a.y + a.h/2);
-                const d  = Math.sqrt(dx*dx + dy*dy) || 1;
-                const f  = REP / (d*d);
-                a.fx -= f*dx/d; a.fy -= f*dy/d;
-                b.fx += f*dx/d; b.fy += f*dy/d;
+    if (isClassicModels) {
+        const matrix = {
+            offices:      { col: 0, row: 0 },
+            employees:    { col: 1, row: 0 },
+            customers:    { col: 2, row: 0 },
+            payments:     { col: 3, row: 0 },
+            productlines: { col: 0, row: 1 },
+            products:     { col: 1, row: 1 },
+            orderdetails: { col: 2, row: 1 },
+            orders:       { col: 3, row: 1 }
+        };
+
+        const colWidth = ERD_TBL_W;
+        const colGap   = 100;
+        const startX   = 50;
+        const startY   = 50;
+
+        let maxRow0H = 0;
+        _dn.forEach(n => {
+            const pos = matrix[n.table];
+            if (pos && pos.row === 0) {
+                if (n.h > maxRow0H) maxRow0H = n.h;
             }
-        }
-
-        // Spring along edges
-        _de.forEach(e => {
-            const a = ns.find(n => n.table === e.from_table);
-            const b = ns.find(n => n.table === e.to_table);
-            if (!a || !b || a === b) return;
-            const dx = (b.x + b.w/2) - (a.x + a.w/2);
-            const dy = (b.y + b.h/2) - (a.y + a.h/2);
-            const d  = Math.sqrt(dx*dx + dy*dy) || 1;
-            const f  = SK * (d - SLEN);
-            a.fx += f*dx/d; a.fy += f*dy/d;
-            b.fx -= f*dx/d; b.fy -= f*dy/d;
         });
+        const rowGap = 95;
+        const row1Y = startY + maxRow0H + rowGap;
 
-        ns.forEach(n => {
-            n.vx = (n.vx + n.fx) * DAMP;
-            n.vy = (n.vy + n.fy) * DAMP;
-            n.x  += n.vx;
-            n.y  += n.vy;
+        let extraIdx = 0;
+        _dn.forEach(n => {
+            const pos = matrix[n.table];
+            if (pos) {
+                n.x = startX + pos.col * (colWidth + colGap);
+                n.y = pos.row === 0 ? startY : row1Y;
+                n.w = colWidth;
+            } else {
+                n.x = startX + (extraIdx % 4) * (colWidth + colGap);
+                n.y = row1Y + 300 + Math.floor(extraIdx / 4) * 260;
+                n.w = colWidth;
+                extraIdx++;
+            }
+        });
+    } else {
+        _applyHierarchicalLayout(tables, schema, rels);
+    }
+}
+
+function _applyHierarchicalLayout(tables, schema, rels) {
+    const colWidth = ERD_TBL_W;
+    const colGap   = 90;
+    const rowGap   = 40;
+    const startX   = 50;
+    const startY   = 50;
+
+    const outEdges = {};
+    const inEdges = {};
+    tables.forEach(t => { outEdges[t] = []; inEdges[t] = []; });
+    rels.forEach(r => {
+        if (r.from_table !== r.to_table && outEdges[r.from_table] && inEdges[r.to_table]) {
+            outEdges[r.from_table].push(r.to_table);
+            inEdges[r.to_table].push(r.from_table);
+        }
+    });
+
+    const layer = {};
+    tables.forEach(t => {
+        if (outEdges[t].length === 0) layer[t] = 0;
+    });
+
+    if (Object.keys(layer).length === 0) {
+        let minOut = Infinity, minT = tables[0];
+        tables.forEach(t => {
+            if (outEdges[t].length < minOut) { minOut = outEdges[t].length; minT = t; }
+        });
+        layer[minT] = 0;
+    }
+
+    let changed = true;
+    let maxIter = 10;
+    while (changed && maxIter-- > 0) {
+        changed = false;
+        tables.forEach(t => {
+            const parents = outEdges[t];
+            if (parents.length > 0) {
+                const pLayers = parents.map(p => layer[p]).filter(l => l !== undefined);
+                if (pLayers.length > 0) {
+                    const newL = Math.max(...pLayers) + 1;
+                    if (layer[t] !== newL) {
+                        layer[t] = newL;
+                        changed = true;
+                    }
+                }
+            }
         });
     }
+
+    tables.forEach(t => { if (layer[t] === undefined) layer[t] = 0; });
+
+    const columns = {};
+    tables.forEach(t => {
+        const l = layer[t];
+        if (!columns[l]) columns[l] = [];
+        columns[l].push(t);
+    });
+
+    const nodeMap = {};
+    _dn.forEach(n => { nodeMap[n.table] = n; n.w = colWidth; });
+
+    Object.keys(columns).sort((a,b)=>a-b).forEach(l => {
+        const colTables = columns[l];
+        let currY = startY;
+        const colX = startX + parseInt(l) * (colWidth + colGap);
+        colTables.forEach(t => {
+            const n = nodeMap[t];
+            if (n) {
+                n.x = colX;
+                n.y = currY;
+                currY += n.h + rowGap;
+            }
+        });
+    });
 }
 
 function _centerDiagram() {
     if (!_dc || _dn.length === 0) return;
-    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     _dn.forEach(n => {
-        minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
-        maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
+        minX = Math.min(minX, n.x);
+        minY = Math.min(minY, n.y);
+        maxX = Math.max(maxX, n.x + n.w);
+        maxY = Math.max(maxY, n.y + n.h);
     });
-    const gW = maxX - minX, gH = maxY - minY;
-    const pad = 70;
-    const sx = (_dc.width  - pad*2) / gW;
-    const sy = (_dc.height - pad*2) / gH;
-    _dt.s  = Math.min(sx, sy, 1.15);
+    const gW = maxX - minX || 100;
+    const gH = maxY - minY || 100;
+    const pad = 65;
+    const sx = (_dc.width  - pad * 2) / gW;
+    const sy = (_dc.height - pad * 2) / gH;
+    _dt.s  = Math.max(0.35, Math.min(sx, sy, 1.05));
     _dt.px = (_dc.width  - gW * _dt.s) / 2 - minX * _dt.s;
     _dt.py = (_dc.height - gH * _dt.s) / 2 - minY * _dt.s;
 }
@@ -960,18 +1073,19 @@ function _drawDiagram() {
     ctx.clearRect(0, 0, cv.width, cv.height);
 
     // Canvas background
-    ctx.fillStyle = _cssVar('--bg-app', '#16161e');
+    ctx.fillStyle = _cssVar('--bg-app', '#0f172a');
     ctx.fillRect(0, 0, cv.width, cv.height);
 
     // Faint grid dots
-    ctx.fillStyle = 'rgba(255,255,255,0.04)';
-    const gridS = 28;
-    for (let gx = gridS/2; gx < cv.width; gx += gridS)
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    const gridS = 32;
+    for (let gx = gridS/2; gx < cv.width; gx += gridS) {
         for (let gy = gridS/2; gy < cv.height; gy += gridS) {
             ctx.beginPath();
-            ctx.arc(gx, gy, 1, 0, Math.PI*2);
+            ctx.arc(gx, gy, 1, 0, Math.PI * 2);
             ctx.fill();
         }
+    }
 
     ctx.save();
     ctx.translate(_dt.px, _dt.py);
@@ -985,104 +1099,138 @@ function _drawDiagram() {
 
 function _drawNode(ctx, n) {
     const {x, y, w, h, table, cols, fkCols, color} = n;
-    const R = 7;
-    const isSelected = _dSelected === table;
+    const R = 8;
+    const isSelected = (_dSelected === table);
 
     // Card shadow
-    ctx.shadowColor = isSelected ? color : 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur  = isSelected ? 22 : 14;
+    ctx.shadowColor = isSelected ? color : 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur  = isSelected ? 22 : 12;
     ctx.shadowOffsetY = 4;
 
     // Body
     _rRect(ctx, x, y, w, h, R);
-    ctx.fillStyle = _cssVar('--bg-surface', '#1e1e2e');
+    ctx.fillStyle = _cssVar('--bg-surface', '#1e293b');
     ctx.fill();
 
-    // Outline (highlight when selected)
-    ctx.strokeStyle = isSelected ? color : _cssVar('--border-subtle', '#2a2a3e');
+    // Outline
+    ctx.strokeStyle = isSelected ? color : 'rgba(255,255,255,0.08)';
     ctx.lineWidth   = isSelected ? 2.5 : 1;
-    _rRect(ctx, x, y, w, h, R); ctx.stroke();
+    _rRect(ctx, x, y, w, h, R);
+    ctx.stroke();
 
-    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
 
     // Header gradient
     const g = ctx.createLinearGradient(x, y, x + w, y + ERD_HDR_H);
     g.addColorStop(0, color);
-    g.addColorStop(1, _lightenHex(color, 25));
+    g.addColorStop(1, _lightenHex(color, 24));
     _rRectTop(ctx, x, y, w, ERD_HDR_H, R);
-    ctx.fillStyle = g; ctx.fill();
+    ctx.fillStyle = g;
+    ctx.fill();
 
-    // Header separator
-    ctx.strokeStyle = _darkenHex(color, 20);
+    // Header separator line
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, y + ERD_HDR_H); ctx.lineTo(x + w, y + ERD_HDR_H); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y + ERD_HDR_H);
+    ctx.lineTo(x + w, y + ERD_HDR_H);
+    ctx.stroke();
+
+    // Table icon (grid symbol)
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    const iconX = x + 12, iconY = y + ERD_HDR_H/2;
+    ctx.fillRect(iconX, iconY - 5, 4, 4);
+    ctx.fillRect(iconX + 6, iconY - 5, 4, 4);
+    ctx.fillRect(iconX, iconY + 1, 4, 4);
+    ctx.fillRect(iconX + 6, iconY + 1, 4, 4);
 
     // Table name
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 12.5px "Segoe UI",system-ui,sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(table, x + w/2, y + ERD_HDR_H/2);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 13px "Segoe UI",system-ui,sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(table, x + 26, y + ERD_HDR_H/2);
 
-    // Column rows
-    const mainColor  = _cssVar('--text-main',  '#e4e4f0');
-    const mutedColor = _cssVar('--text-muted', '#888898');
-    const elevColor  = _cssVar('--bg-surface-elevated', 'rgba(255,255,255,0.04)');
-    const sepColor   = _cssVar('--border-subtle', '#2a2a3e');
+    // Column count badge on header right
+    const countText = `${cols.length} col`;
+    ctx.font = '9px "Segoe UI",sans-serif';
+    const ctw = ctx.measureText(countText).width;
+    const cbx = x + w - ctw - 18;
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    _rRect(ctx, cbx, y + ERD_HDR_H/2 - 7, ctw + 10, 14, 3);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(countText, cbx + (ctw + 10)/2, y + ERD_HDR_H/2);
+
+    // Columns
+    const mainColor  = '#f1f5f9';
+    const mutedColor = '#94a3b8';
+    const elevColor  = 'rgba(255,255,255,0.025)';
+    const sepColor   = 'rgba(255,255,255,0.05)';
 
     cols.forEach((col, i) => {
         const rowY  = y + ERD_HDR_H + i * ERD_COL_H;
-        const midY  = rowY + ERD_COL_H / 2 + 1;
-        const isPk  = col.pk;
-        const isFk  = !!(fkCols && fkCols[`${table}.${col.name}`]);
+        const midY  = rowY + ERD_COL_H / 2 + 0.5;
+        const isPk  = !!col.pk;
+        const normColName = (col.name || '').toLowerCase().replace(/_/g, '');
+        const isFk  = !!(fkCols && fkCols[`${table}.${normColName}`]);
 
-        // Alternating row tint
+        // Zebra tint
         if (i % 2 === 0) {
             ctx.fillStyle = elevColor;
             ctx.fillRect(x + 1, rowY, w - 2, ERD_COL_H);
         }
 
-        // Row separator
+        // Row border
         if (i < cols.length - 1) {
-            ctx.strokeStyle = sepColor; ctx.lineWidth = 0.5;
-            ctx.beginPath(); ctx.moveTo(x+1, rowY + ERD_COL_H); ctx.lineTo(x+w-1, rowY + ERD_COL_H); ctx.stroke();
+            ctx.strokeStyle = sepColor;
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(x + 2, rowY + ERD_COL_H);
+            ctx.lineTo(x + w - 2, rowY + ERD_COL_H);
+            ctx.stroke();
         }
 
-        // Badge(s)
-        let bx = x + 5;
-        if (isPk) { bx = _badge(ctx, bx, midY, 'PK', '#f59e0b'); }
-        if (isFk) { bx = _badge(ctx, bx, midY, 'FK', '#6366f1'); }
+        // Badges
+        let bx = x + 7;
+        if (isPk) { bx = _drawBadge(ctx, bx, midY, 'PK', '#f59e0b'); }
+        if (isFk) { bx = _drawBadge(ctx, bx, midY, 'FK', '#6366f1'); }
 
-        // Column name
-        ctx.fillStyle = isPk ? '#fcd34d' : mainColor;
+        // Column Name
+        ctx.fillStyle = isPk ? '#fbbf24' : (isFk ? '#c7d2fe' : mainColor);
         ctx.font = isPk ? 'bold 11px "Segoe UI",system-ui' : '11px "Segoe UI",system-ui';
         ctx.textAlign = 'left';
-        ctx.fillText(col.name, bx + 3, midY);
+        ctx.textBaseline = 'middle';
+        ctx.fillText(col.name, bx + 2, midY);
 
-        // Type label (right-aligned, truncated)
+        // Column Type
         const typeStr = _shortT(col.type);
-        ctx.fillStyle = isFk ? '#818cf8' : mutedColor;
+        ctx.fillStyle = mutedColor;
         ctx.font = '9.5px "Courier New",monospace';
         ctx.textAlign = 'right';
-        ctx.fillText(typeStr, x + w - 6, midY);
+        ctx.fillText(typeStr, x + w - 8, midY);
     });
-
-    ctx.textAlign = 'left';
 }
 
-function _badge(ctx, x, cy, label, color) {
+function _drawBadge(ctx, x, cy, label, color) {
     const pad = 3, fs = 8.5;
     ctx.font = `bold ${fs}px "Segoe UI",system-ui`;
     const tw = ctx.measureText(label).width;
     const bw = tw + pad * 2;
     const bh = 12;
-    ctx.fillStyle = color + '33';
+    ctx.fillStyle = color + '28';
     ctx.strokeStyle = color;
     ctx.lineWidth = 0.8;
-    _rRectFull(ctx, x, cy - bh/2, bw, bh, 2);
-    ctx.fill(); ctx.stroke();
+    _rRectFull(ctx, x, cy - bh/2, bw, bh, 2.5);
+    ctx.fill();
+    ctx.stroke();
     ctx.fillStyle = color;
     ctx.textAlign = 'center';
-    ctx.fillText(label, x + bw/2, cy + 0.5);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + bw/2, cy);
     return x + bw + 4;
 }
 
@@ -1090,7 +1238,6 @@ function _drawEdges(ctx) {
     const nMap = {};
     _dn.forEach(n => nMap[n.table] = n);
 
-    // Group edges by table pair
     const grp = {};
     _de.forEach(e => {
         const key = `${e.from_table}||${e.to_table}`;
@@ -1098,61 +1245,159 @@ function _drawEdges(ctx) {
         grp[key].push(e);
     });
 
+    const allPairs = [];
     Object.values(grp).forEach(edges => {
         edges.forEach((e, idx) => {
-            const a = nMap[e.from_table], b = nMap[e.to_table];
-            if (!a || !b || a === b) return;
-            const off = (idx - (edges.length - 1) / 2) * 12;
-            _drawEdge(ctx, a, b, e, off);
+            const a = nMap[e.from_table];
+            const b = nMap[e.to_table];
+            if (!a || !b) return;
+            const off = (idx - (edges.length - 1) / 2) * 8;
+            const isSelected = _dSelected && (_dSelected === e.from_table || _dSelected === e.to_table);
+            allPairs.push({ a, b, edge: e, off, isSelected });
         });
+    });
+
+    allPairs.sort((p1, p2) => (p1.isSelected ? 1 : 0) - (p2.isSelected ? 1 : 0));
+
+    allPairs.forEach(p => {
+        _drawEdge(ctx, p.a, p.b, p.edge, p.off, p.isSelected);
     });
 }
 
-function _drawEdge(ctx, a, b, edge, off) {
-    const acx = a.x + a.w/2, bcx = b.x + b.w/2;
-    const leftToRight = acx <= bcx;
-    const ax = leftToRight ? a.x + a.w : a.x;
-    const bx = leftToRight ? b.x        : b.x + b.w;
+function _drawEdge(ctx, a, b, edge, off, isHighlighted) {
+    const isSelf = (a === b);
+    const hasSelection = (_dSelected !== null);
+    const isDimmed = hasSelection && !isHighlighted;
 
-    const fromIdx = a.cols.findIndex(c => c.name === edge.from_col);
-    const toIdx   = b.cols.findIndex(c => c.name === edge.to_col);
-    const ay = a.y + ERD_HDR_H + (fromIdx >= 0 ? fromIdx * ERD_COL_H + ERD_COL_H/2 : a.h/2) + off;
-    const by = b.y + ERD_HDR_H + (toIdx   >= 0 ? toIdx   * ERD_COL_H + ERD_COL_H/2 : b.h/2) + off;
+    const baseColor  = isHighlighted ? '#a5b4fc' : (isDimmed ? 'rgba(148, 163, 184, 0.16)' : 'rgba(99, 102, 241, 0.52)');
+    const arrowColor = isHighlighted ? '#818cf8' : (isDimmed ? 'rgba(148, 163, 184, 0.25)' : 'rgba(99, 102, 241, 0.85)');
+    const lineWidth  = isHighlighted ? 2.4 : (isDimmed ? 1 : 1.5);
 
-    const cp = Math.min(Math.abs(bx - ax) * 0.5, 120);
-    const cpx1 = ax + (leftToRight ?  cp : -cp);
-    const cpx2 = bx + (leftToRight ? -cp :  cp);
+    const fromColNorm = (edge.from_col || '').toLowerCase().replace(/_/g, '');
+    const toColNorm   = (edge.to_col   || '').toLowerCase().replace(/_/g, '');
 
-    const isHighlighted = _dSelected &&
-        (_dSelected === edge.from_table || _dSelected === edge.to_table);
+    const fromIdx = a.cols.findIndex(c => (c.name || '').toLowerCase().replace(/_/g, '') === fromColNorm);
+    const toIdx   = b.cols.findIndex(c => (c.name || '').toLowerCase().replace(/_/g, '') === toColNorm);
 
-    const baseColor  = isHighlighted ? '#818cf8' : 'rgba(99,102,241,0.45)';
-    const arrowColor = isHighlighted ? '#6366f1' : 'rgba(99,102,241,0.75)';
+    // 1. Self-referential FK (e.g. employees.reports_to -> employees.employee_number)
+    if (isSelf) {
+        const sy = a.y + ERD_HDR_H + (fromIdx >= 0 ? fromIdx * ERD_COL_H + ERD_COL_H/2 : a.h * 0.75);
+        const ty = a.y + ERD_HDR_H + (toIdx   >= 0 ? toIdx   * ERD_COL_H + ERD_COL_H/2 : a.h * 0.25);
+        const sx = a.x;
+        const tx = a.x;
+        const loopOut = 42;
+
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth   = lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.bezierCurveTo(sx - loopOut, sy + 8, tx - loopOut, ty - 8, tx, ty);
+        ctx.stroke();
+
+        ctx.fillStyle = arrowColor;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.lineTo(tx - 7, ty - 4);
+        ctx.lineTo(tx - 7, ty + 4);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(sx, sy, isHighlighted ? 4 : 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (isHighlighted) {
+            _drawBadgeOnLine(ctx, sx - loopOut + 4, (sy + ty)/2, `${edge.from_col} → ${edge.to_col}`);
+        }
+        return;
+    }
+
+    // 2. Inter-table FK
+    const ay = a.y + ERD_HDR_H + (fromIdx >= 0 ? fromIdx * ERD_COL_H + ERD_COL_H/2 : a.h / 2) + off;
+    const by = b.y + ERD_HDR_H + (toIdx   >= 0 ? toIdx   * ERD_COL_H + ERD_COL_H/2 : b.h / 2) + off;
+
+    let ax, bx, cpx1, cpx2, cpy1, cpy2;
+    let targetDir = 1;
+
+    if (a.x >= b.x + b.w - 10) {
+        // Source A is to the right of Target B (leaves A left, enters B right)
+        ax = a.x;
+        bx = b.x + b.w;
+        const dx = ax - bx;
+        const cp = Math.max(35, Math.min(dx * 0.5, 90));
+        cpx1 = ax - cp;
+        cpx2 = bx + cp;
+        cpy1 = ay;
+        cpy2 = by;
+        targetDir = -1;
+    } else if (a.x + a.w <= b.x + 10) {
+        // Source A is to the left of Target B (leaves A right, enters B left)
+        ax = a.x + a.w;
+        bx = b.x;
+        const dx = bx - ax;
+        const cp = Math.max(35, Math.min(dx * 0.5, 90));
+        cpx1 = ax + cp;
+        cpx2 = bx - cp;
+        cpy1 = ay;
+        cpy2 = by;
+        targetDir = 1;
+    } else {
+        // Vertically overlapping X coordinates
+        ax = a.x + a.w;
+        bx = b.x + b.w;
+        cpx1 = ax + 45;
+        cpx2 = bx + 45;
+        cpy1 = ay;
+        cpy2 = by;
+        targetDir = -1;
+    }
 
     ctx.strokeStyle = baseColor;
-    ctx.lineWidth   = isHighlighted ? 2 : 1.2;
-    ctx.setLineDash([]);
+    ctx.lineWidth   = lineWidth;
     ctx.beginPath();
     ctx.moveTo(ax, ay);
-    ctx.bezierCurveTo(cpx1, ay, cpx2, by, bx, by);
+    ctx.bezierCurveTo(cpx1, cpy1, cpx2, cpy2, bx, by);
     ctx.stroke();
 
-    // Arrowhead on target (PK side)
-    const dir = leftToRight ? 1 : -1;
+    // Arrowhead at target PK
     const AS = 7;
     ctx.fillStyle = arrowColor;
     ctx.beginPath();
     ctx.moveTo(bx, by);
-    ctx.lineTo(bx - dir*AS, by - 4);
-    ctx.lineTo(bx - dir*AS, by + 4);
+    ctx.lineTo(bx - targetDir * AS, by - 4);
+    ctx.lineTo(bx - targetDir * AS, by + 4);
     ctx.closePath();
     ctx.fill();
 
-    // Dot on source (FK / many side)
-    ctx.fillStyle = arrowColor;
+    // Source dot at FK
     ctx.beginPath();
-    ctx.arc(ax, ay, isHighlighted ? 4.5 : 3, 0, Math.PI*2);
+    ctx.arc(ax, ay, isHighlighted ? 4 : 3, 0, Math.PI * 2);
     ctx.fill();
+
+    if (isHighlighted) {
+        const mx = 0.125 * ax + 0.375 * cpx1 + 0.375 * cpx2 + 0.125 * bx;
+        const my = 0.125 * ay + 0.375 * cpy1 + 0.375 * cpy2 + 0.125 * by;
+        _drawBadgeOnLine(ctx, mx, my, `${edge.from_col} → ${edge.to_col}`);
+    }
+}
+
+function _drawBadgeOnLine(ctx, cx, cy, text) {
+    ctx.save();
+    ctx.font = 'bold 9.5px "Segoe UI",system-ui,sans-serif';
+    const tw = ctx.measureText(text).width;
+    const bw = tw + 14;
+    const bh = 17;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+    ctx.strokeStyle = '#818cf8';
+    ctx.lineWidth = 1;
+    _rRect(ctx, cx - bw/2, cy - bh/2, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e0e7ff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx, cy);
+    ctx.restore();
 }
 
 function _bindDiagramEvents() {
@@ -1160,88 +1405,169 @@ function _bindDiagramEvents() {
     if (!cv || cv._erdBound) return;
     cv._erdBound = true;
 
-    // Pan
+    function getCanvasCoords(e) {
+        const rect = cv.getBoundingClientRect();
+        return {
+            cx: e.clientX - rect.left,
+            cy: e.clientY - rect.top,
+            wx: (e.clientX - rect.left - _dt.px) / _dt.s,
+            wy: (e.clientY - rect.top  - _dt.py) / _dt.s
+        };
+    }
+
     cv.addEventListener('mousedown', e => {
-        _dDrag = true;
-        _dLast = {x: e.clientX, y: e.clientY};
-        cv.style.cursor = 'grabbing';
+        const { cx, cy, wx, wy } = getCanvasCoords(e);
+        _downPos = { x: cx, y: cy };
+
+        let hit = null;
+        for (let i = _dn.length - 1; i >= 0; i--) {
+            const n = _dn[i];
+            if (wx >= n.x && wx <= n.x + n.w && wy >= n.y && wy <= n.y + n.h) {
+                hit = n;
+                break;
+            }
+        }
+
+        if (hit) {
+            _draggedNode = hit;
+            _dragOffset = { x: wx - hit.x, y: wy - hit.y };
+            cv.style.cursor = 'grabbing';
+        } else {
+            _dDrag = true;
+            _dLast = { x: e.clientX, y: e.clientY };
+            cv.style.cursor = 'grabbing';
+        }
     });
+
     window.addEventListener('mousemove', e => {
-        if (!_dDrag) return;
-        _dt.px += e.clientX - _dLast.x;
-        _dt.py += e.clientY - _dLast.y;
-        _dLast = {x: e.clientX, y: e.clientY};
+        if (_draggedNode) {
+            const { wx, wy } = getCanvasCoords(e);
+            _draggedNode.x = Math.round(wx - _dragOffset.x);
+            _draggedNode.y = Math.round(wy - _dragOffset.y);
+            _drawDiagram();
+            return;
+        }
+
+        if (_dDrag) {
+            _dt.px += e.clientX - _dLast.x;
+            _dt.py += e.clientY - _dLast.y;
+            _dLast = { x: e.clientX, y: e.clientY };
+            _drawDiagram();
+            return;
+        }
+
+        const { wx, wy } = getCanvasCoords(e);
+        let hoverNode = null;
+        for (let i = _dn.length - 1; i >= 0; i--) {
+            const n = _dn[i];
+            if (wx >= n.x && wx <= n.x + n.w && wy >= n.y && wy <= n.y + n.h) {
+                hoverNode = n;
+                break;
+            }
+        }
+        cv.style.cursor = hoverNode ? 'grab' : 'default';
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (_draggedNode) {
+            _draggedNode = null;
+            if (cv) cv.style.cursor = 'grab';
+        }
+        if (_dDrag) {
+            _dDrag = false;
+            if (cv) cv.style.cursor = 'default';
+        }
+    });
+
+    cv.addEventListener('click', e => {
+        const { cx, cy, wx, wy } = getCanvasCoords(e);
+        const dist = Math.hypot(cx - _downPos.x, cy - _downPos.y);
+        if (dist > 4) return; // Ignore drag release
+
+        let hit = null;
+        for (let i = _dn.length - 1; i >= 0; i--) {
+            const n = _dn[i];
+            if (wx >= n.x && wx <= n.x + n.w && wy >= n.y && wy <= n.y + n.h) {
+                hit = n.table;
+                break;
+            }
+        }
+        _dSelected = (_dSelected === hit) ? null : hit;
         _drawDiagram();
     });
-    window.addEventListener('mouseup', () => { _dDrag = false; if (cv) cv.style.cursor = 'grab'; });
 
-    // Zoom
     cv.addEventListener('wheel', e => {
         e.preventDefault();
-        const d = e.deltaY > 0 ? 0.88 : 1.14;
+        const factor = e.deltaY > 0 ? 0.9 : 1.1;
         const rect = cv.getBoundingClientRect();
-        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-        _dt.px = mx - d*(mx - _dt.px);
-        _dt.py = my - d*(my - _dt.py);
-        _dt.s *= d;
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        _dt.px = mx - factor * (mx - _dt.px);
+        _dt.py = my - factor * (my - _dt.py);
+        _dt.s *= factor;
+        _dt.s = Math.max(0.3, Math.min(_dt.s, 2.5));
         _drawDiagram();
-    }, {passive:false});
-
-    // Click to highlight table
-    cv.addEventListener('click', e => {
-        const rect = cv.getBoundingClientRect();
-        const mx = (e.clientX - rect.left - _dt.px) / _dt.s;
-        const my = (e.clientY - rect.top  - _dt.py) / _dt.s;
-        let hit = null;
-        _dn.forEach(n => {
-            if (mx >= n.x && mx <= n.x + n.w && my >= n.y && my <= n.y + n.h) hit = n.table;
-        });
-        _dSelected = (hit === _dSelected) ? null : hit;
-        _drawDiagram();
-    });
-
-    cv.style.cursor = 'grab';
+    }, { passive: false });
 }
 
-function erdZoomIn()    { _dt.s *= 1.2; _drawDiagram(); }
-function erdZoomOut()   { _dt.s /= 1.2; _drawDiagram(); }
-function erdResetView() { _centerDiagram(); _dSelected = null; _drawDiagram(); }
+function erdZoomIn()      { _dt.s = Math.min(_dt.s * 1.2, 2.5); _drawDiagram(); }
+function erdZoomOut()     { _dt.s = Math.max(_dt.s / 1.2, 0.3); _drawDiagram(); }
+function erdResetView()   { _centerDiagram(); _drawDiagram(); }
+function erdResetLayout() { _applyStructuredLayout(); _centerDiagram(); _dSelected = null; _drawDiagram(); }
 
 // ---- Canvas helpers ----
 function _rRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
-    ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
-    ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
-    ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
-    ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+    ctx.moveTo(x+r, y);
+    ctx.lineTo(x+w-r, y);
+    ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+    ctx.lineTo(x+w, y+h-r);
+    ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+    ctx.lineTo(x+r, y+h);
+    ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+    ctx.lineTo(x, y+r);
+    ctx.quadraticCurveTo(x, y, x+r, y);
+    ctx.closePath();
 }
+
 function _rRectTop(ctx, x, y, w, h, r) {
     ctx.beginPath();
-    ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
-    ctx.lineTo(x+w,y+h); ctx.lineTo(x,y+h);
-    ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+    ctx.moveTo(x+r, y);
+    ctx.lineTo(x+w-r, y);
+    ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+    ctx.lineTo(x+w, y+h);
+    ctx.lineTo(x, y+h);
+    ctx.lineTo(x, y+r);
+    ctx.quadraticCurveTo(x, y, x+r, y);
+    ctx.closePath();
 }
-function _rRectFull(ctx, x, y, w, h, r) { _rRect(ctx,x,y,w,h,r); }
+
+function _rRectFull(ctx, x, y, w, h, r) { _rRect(ctx, x, y, w, h, r); }
 
 function _cssVar(name, fallback) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 function _lightenHex(hex, amt) {
-    const n = parseInt(hex.slice(1),16);
-    const r = Math.min(255,(n>>16)+amt);
-    const g = Math.min(255,((n>>8)&0xff)+amt);
-    const b = Math.min(255,(n&0xff)+amt);
-    return '#'+(((r<<16)|(g<<8)|b).toString(16).padStart(6,'0'));
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.min(255, (n >> 16) + amt);
+    const g = Math.min(255, ((n >> 8) & 0xff) + amt);
+    const b = Math.min(255, (n & 0xff) + amt);
+    return '#' + (((r << 16) | (g << 8) | b).toString(16).padStart(6, '0'));
 }
-function _darkenHex(hex, amt) { return _lightenHex(hex, -amt); }
 
 function _shortT(t) {
     const m = {
-        'character varying':'varchar','double precision':'double','integer':'int',
-        'smallint':'int2','bigint':'int8','boolean':'bool',
-        'timestamp without time zone':'timestamp','timestamp with time zone':'timestamptz',
-        'character':'char','numeric':'numeric'
+        'character varying':'varchar',
+        'double precision':'double',
+        'integer':'int',
+        'smallint':'int2',
+        'bigint':'int8',
+        'boolean':'bool',
+        'timestamp without time zone':'timestamp',
+        'timestamp with time zone':'timestamptz',
+        'character':'char',
+        'numeric':'numeric'
     };
-    return m[t] || (t && t.length > 9 ? t.slice(0,9)+'..' : t);
+    return m[t] || (t && t.length > 9 ? t.slice(0, 9) + '..' : t);
 }

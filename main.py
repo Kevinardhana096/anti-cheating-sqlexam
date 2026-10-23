@@ -618,7 +618,8 @@ async def api_admin_schema(request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
     schema = database.get_classicmodels_schema()
-    return {"schema": schema}
+    relations = database.get_classicmodels_fk_relations()
+    return {"schema": schema, "relations": relations}
 
 @app.post("/api/admin/reset-database")
 async def api_admin_reset_database(request: Request):
