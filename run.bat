@@ -39,7 +39,7 @@ echo Status Jaringan   : Siap (Offline Local Network)
 echo Akses Mahasiswa   : http://%HOST_IP%:8000
 echo Akses Dosen/Admin : http://localhost:8000/admin
 echo Master Key Admin  : %MASTER_KEY%
-echo Database Sandbox  : PostgreSQL (classicmodels)
+echo Database Sandbox  : PostgreSQL (pagila, classicmodels, sandbox_pribadi)
 echo ==========================================================
 echo Tekan Ctrl+C untuk menghentikan server.
 echo.
