@@ -1213,30 +1213,42 @@ def get_questions_by_category(category: str, include_expected_query: bool = Fals
 
 
 def get_available_categories() -> List[Dict[str, Any]]:
-
-    """Returns distinct categories of questions present in the database."""
+    """Returns distinct categories of questions present in the database, prioritizing active configured packages."""
+    pkgs = get_all_packages(include_inactive=False)
+    if pkgs:
+        res = []
+        for p in pkgs:
+            p_dict = dict(p)
+            p_dict["category"] = p["code"]
+            p_dict["count"] = p.get("total_questions", 0)
+            p_dict["total_questions"] = p.get("total_questions", 0)
+            p_dict["question_count"] = p.get("total_questions", 0)
+            p_dict["total_score"] = p.get("total_score", 0)
+            p_dict["total_weight"] = p.get("total_score", 0)
+            res.append(p_dict)
+        return res
 
     conn = get_sqlite_conn()
-
     cur = conn.cursor()
-
     cur.execute("""
-
         SELECT category, COUNT(*) as count, SUM(score_weight) as total_score
-
         FROM questions
-
         GROUP BY category
-
         ORDER BY category;
-
     """)
-
     rows = cur.fetchall()
-
     conn.close()
-
-    return [{"category": r[0], "count": r[1], "total_score": r[2] or 0} for r in rows]
+    return [{
+        "category": r[0],
+        "code": r[0],
+        "name": f"Paket {r[0]}",
+        "description": "",
+        "count": r[1],
+        "total_questions": r[1],
+        "question_count": r[1],
+        "total_score": r[2] or 0,
+        "total_weight": r[2] or 0
+    } for r in rows]
 
 
 

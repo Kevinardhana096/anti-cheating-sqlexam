@@ -834,11 +834,11 @@ function showCategorySelectionModal(categories) {
 
     grid.innerHTML = "";
     categories.forEach(c => {
-        const cat = c.category;
+        const cat = c.category || c.code;
         const name = c.name || `Paket ${cat}`;
         const desc = c.description || "";
-        const count = c.total_questions || 0;
-        const weight = c.total_weight || 0;
+        const count = c.total_questions ?? c.question_count ?? c.count ?? 0;
+        const weight = c.total_weight ?? c.total_score ?? 0;
 
         const card = document.createElement("div");
         card.className = "pkg-card";
@@ -850,6 +850,7 @@ function showCategorySelectionModal(categories) {
             ${desc ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin: 0.35rem 0 0.5rem 0; line-height: 1.35; max-height: 2.8em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;" title="${escapeHtml(desc)}">${escapeHtml(desc)}</div>` : ''}
             <div class="pkg-card-meta">
                 <span class="pkg-pill">${count} Soal</span>
+                <span class="pkg-pill" style="background: rgba(16, 185, 129, 0.15); color: #34d399;">${weight} Poin</span>
             </div>
             <button type="button" class="btn btn-primary btn-sm" style="margin-top: 0.5rem; width: 100%; pointer-events: none;">
                 Pilih Paket Ini
