@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Waiting Room - Ujian Praktikum Basis Data</title>
     <script>(function(){var t=localStorage.getItem("exam_global_theme")||"dracula";document.documentElement.setAttribute("data-theme",t);})()</script>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=20261101_v5">
     <style>
         .wr-root{min-height:100vh;display:grid;grid-template-rows:auto 1fr;background-color:var(--bg-app);}
         .wr-body{display:grid;grid-template-columns:1fr 340px;height:calc(100vh - 61px);overflow:hidden;}
@@ -169,32 +169,11 @@
     if(sel)sel.addEventListener("change",function(){applyTheme(sel.value);localStorage.setItem(THEME_KEY,sel.value);});
 
     var MY_NIM=document.body.dataset.nim||"";
-    var lastMsgId=0;
     var examStarted=false;
-
-    async function pollExamState(){
-        if(examStarted)return;
-        try{var r=await fetch("/api/exam/state",{credentials:"same-origin"});if(!r.ok)return;var d=await r.json();if(d.state==="active")triggerExamStart();}catch(_){}
-    }
-
-    async function sendHeartbeat(){
-        if(examStarted)return;
-        try{await fetch("/api/waiting/heartbeat",{method:"POST",credentials:"same-origin"});}catch(_){}
-    }
-
-    async function pollParticipants(){
-        try{var r=await fetch("/api/waiting/participants",{credentials:"same-origin"});if(!r.ok)return;var d=await r.json();renderParticipants(d.participants||[]);}catch(_){}
-    }
-
-    async function pollMessages(){
-        try{
-            var r=await fetch("/api/waiting/messages?since_id="+lastMsgId,{credentials:"same-origin"});
-            if(!r.ok)return;
-            var d=await r.json();
-            var msgs=d.messages||[];
-            if(msgs.length>0){msgs.forEach(appendMessage);lastMsgId=msgs[msgs.length-1].id;}
-        }catch(_){}
-    }
+    var ws=null;
+    var wsReconnectTimer=null;
+    var pingInterval=null;
+    var fallbackTimer=null;
 
     function renderParticipants(list){
         var grid=document.getElementById("wr-participants-grid");
@@ -263,7 +242,19 @@
         var text=chatInput.value.trim();
         if(!text||chatInput.disabled)return;
         chatInput.value="";chatInput.disabled=true;
-        try{await fetch("/api/waiting/messages",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:text})});}catch(_){}
+        
+        var sentViaWs = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+                ws.send(JSON.stringify({ type: "CHAT", message: text }));
+                sentViaWs = true;
+            } catch (_) {}
+        }
+        
+        if (!sentViaWs) {
+            try{await fetch("/api/waiting/messages",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:text})});}catch(_){}
+        }
+
         chatInput.disabled=false;chatInput.focus();
     });
 
@@ -274,6 +265,9 @@
     function triggerExamStart(){
         if(examStarted)return;
         examStarted=true;
+        if (ws) {
+            try { ws.close(); } catch (_) {}
+        }
         var ring=document.getElementById("wr-pulse-ring");
         var title=document.getElementById("wr-status-title");
         var desc=document.getElementById("wr-status-desc");
@@ -301,14 +295,86 @@
         try{var d=new Date(iso.endsWith("Z")?iso:iso+"Z");return d.toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"});}catch(_){return"";}
     }
 
-    sendHeartbeat();
-    pollParticipants();
-    pollMessages();
-    pollExamState();
-    setInterval(sendHeartbeat,10000);
-    setInterval(pollExamState,2000);
-    setInterval(pollParticipants,5000);
-    setInterval(pollMessages,2000);
+    function connectWebSocket(){
+        if(examStarted)return;
+        var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        var wsUrl = proto + "//" + window.location.host + "/ws/waiting";
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch(e) {
+            startFallbackPolling();
+            return;
+        }
+
+        ws.onopen = function(){
+            clearTimeout(wsReconnectTimer);
+            stopFallbackPolling();
+            clearInterval(pingInterval);
+            pingInterval = setInterval(function(){
+                if(ws && ws.readyState === WebSocket.OPEN){
+                    ws.send(JSON.stringify({ type: "PING" }));
+                }
+            }, 20000);
+        };
+
+        ws.onmessage = function(event){
+            try {
+                var data = JSON.parse(event.data);
+                if(data.event === "INIT_STATE"){
+                    if(data.exam_state === "active"){
+                        triggerExamStart();
+                        return;
+                    }
+                    renderParticipants(data.participants || []);
+                    var msgs = data.messages || [];
+                    msgs.forEach(appendMessage);
+                } else if(data.event === "EXAM_STARTED"){
+                    triggerExamStart();
+                } else if(data.event === "NEW_MESSAGE"){
+                    if(data.message) appendMessage(data.message);
+                } else if(data.event === "PARTICIPANTS_UPDATE"){
+                    renderParticipants(data.participants || []);
+                } else if(data.event === "CLEAR_MESSAGES"){
+                    var box = document.getElementById("wr-chat-messages");
+                    if(box) box.innerHTML = '<div class="wr-msg-system">Pesan chat telah dibersihkan oleh pengawas.</div>';
+                }
+            } catch(err){}
+        };
+
+        ws.onclose = function(){
+            clearInterval(pingInterval);
+            if(!examStarted){
+                wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+            }
+        };
+
+        ws.onerror = function(){
+            try { ws.close(); } catch(_){}
+        };
+    }
+
+    function startFallbackPolling(){
+        if(fallbackTimer || examStarted)return;
+        fallbackTimer = setInterval(async function(){
+            try {
+                var r = await fetch("/api/exam/state");
+                if(r.ok){
+                    var d = await r.json();
+                    if(d.state === "active") triggerExamStart();
+                }
+            } catch(_){}
+        }, 8000);
+    }
+
+    function stopFallbackPolling(){
+        if(fallbackTimer){
+            clearInterval(fallbackTimer);
+            fallbackTimer = null;
+        }
+    }
+
+    // Sambungkan ke WebSocket Hub
+    connectWebSocket();
 })();
 </script>
 </body>

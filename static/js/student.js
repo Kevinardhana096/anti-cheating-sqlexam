@@ -1,7 +1,13 @@
+(function () {
+"use strict";
+
 /**
  * Offline SQL Exam System - Student Workspace Controller
  * Features:
+ * - Scope Encapsulation (IIFE) against DevTools console tampering
  * - CodeMirror 5 Integration (PostgreSQL Mode & Autocompletion)
+ * - Fullscreen Enforcement Guard & Exit Logging
+ * - Anti-F12 / DevTools Shortcut Blocking & Context Menu Disabling
  * - Anti-Copy-Paste Security Filter
  * - Tab Switch / Focus Loss Detection Logging
  * - IP-Binding Heartbeat & Kick Detection
@@ -16,22 +22,40 @@ let questionsData = [];
 let submissionsMap = {};
 let studentNim = "";
 let studentSessionToken = "";
+let studentCategory = "";
+let pendingCategorySelection = null;
 let heartbeatInterval = null;
 let isLoggingOut = false;
+
+function isUserLoggingOut() {
+    return isLoggingOut || Boolean(window.isLoggingOut);
+}
 
 // Initialize when DOM is ready
 document.addEventListener("DOMContentLoaded", () => {
     studentNim = document.body.dataset.nim || "";
     studentSessionToken = document.body.dataset.token || "";
+    studentCategory = document.body.dataset.category || "";
+
+    if (studentCategory) {
+        updateHeaderPackageBadge(studentCategory);
+    }
 
     initCodeMirror();
     initThemeSelector();
     setupAntiCheat();
     setupExitModal();
     loadQuestions();
+    initDatabaseSelector();
+    initImageLightbox();
     loadErdSchema();
     initSidebarTabs();
+    initNetworkMonitor();
     startHeartbeat();
+
+    // Bind Package Selection Modal Buttons
+    document.getElementById("btn-cancel-select-pkg")?.addEventListener("click", cancelPackageSelection);
+    document.getElementById("btn-proceed-lock-pkg")?.addEventListener("click", confirmPackageSelection);
 
     // Bind Action Buttons
     document.getElementById("btn-run-query").addEventListener("click", runQuery);
@@ -41,6 +65,214 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // ==============================================================================
+
+// ==============================================================================
+// 1.0 Local Draft Autosave Manager (Fase 1 - Anti Data Loss)
+// ==============================================================================
+const AUTOSAVE_DEBOUNCE_MS = 600;
+let autosaveTimer = null;
+
+function getDraftStorageKey(nim, questionId) {
+    return `sqlexam_draft_${nim || "guest"}_${questionId}`;
+}
+
+function saveLocalDraft(nim, questionId, queryText) {
+    if (!nim || !questionId) return;
+    try {
+        const payload = {
+            nim: String(nim),
+            questionId: Number(questionId),
+            query: queryText,
+            timestamp: Date.now()
+        };
+        localStorage.setItem(getDraftStorageKey(nim, questionId), JSON.stringify(payload));
+        updateAutosaveUI("saved");
+    } catch (e) {
+        console.warn("Autosave to localStorage failed:", e);
+        updateAutosaveUI("error");
+    }
+}
+
+function getLocalDraft(nim, questionId) {
+    if (!nim || !questionId) return null;
+    try {
+        const raw = localStorage.getItem(getDraftStorageKey(nim, questionId));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        // Expire drafts older than 24 hours
+        if (Date.now() - (parsed.timestamp || 0) > 24 * 60 * 60 * 1000) {
+            localStorage.removeItem(getDraftStorageKey(nim, questionId));
+            return null;
+        }
+        return parsed;
+    } catch (e) {
+        return null;
+    }
+}
+
+function triggerDebouncedAutosave() {
+    if (!editor || !questionsData || !questionsData[currentQuestionIndex]) return;
+    const q = questionsData[currentQuestionIndex];
+    const currentVal = editor.getValue();
+
+    // Cache in RAM
+    q.draftQuery = currentVal;
+
+    updateAutosaveUI("saving");
+
+    if (autosaveTimer) {
+        clearTimeout(autosaveTimer);
+    }
+
+    autosaveTimer = setTimeout(() => {
+        saveLocalDraft(studentNim, q.id, currentVal);
+    }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+function updateAutosaveUI(state) {
+    const indicator = document.getElementById("autosave-indicator");
+    const textEl = document.getElementById("autosave-text");
+    if (!indicator || !textEl) return;
+
+    if (state === "saving") {
+        indicator.className = "autosave-indicator is-saving";
+        textEl.textContent = "Menyimpan draf...";
+        indicator.title = "Sedang menyimpan draf ke penyimpanan lokal browser...";
+    } else if (state === "saved") {
+        indicator.className = "autosave-indicator is-saved";
+        const d = new Date();
+        const timeStr = d.toTimeString().split(" ")[0];
+        textEl.textContent = `Draf tersimpan (${timeStr})`;
+        indicator.title = `Draf kueri otomatis tersimpan di browser ini pada ${timeStr}`;
+    } else if (state === "restored") {
+        indicator.className = "autosave-indicator is-restored";
+        textEl.textContent = "Draf dipulihkan";
+        indicator.title = "Kueri berhasil dipulihkan dari draf lokal browser";
+    } else if (state === "error") {
+        indicator.className = "autosave-indicator is-error";
+        textEl.textContent = "Gagal simpan lokal";
+        indicator.title = "Penyimpanan lokal browser penuh atau diblokir";
+    } else {
+        indicator.className = "autosave-indicator";
+        textEl.textContent = "Draf tersimpan";
+    }
+}
+
+window.saveLocalDraft = saveLocalDraft;
+window.getLocalDraft = getLocalDraft;
+window.triggerDebouncedAutosave = triggerDebouncedAutosave;
+window.getCurrentQuestionId = () => (questionsData[currentQuestionIndex] ? questionsData[currentQuestionIndex].id : null);
+
+
+// ==============================================================================
+// 1.2 Network Monitor & Offline Guard (Fase 2)
+// ==============================================================================
+let isNetworkOnline = true;
+let consecutiveHeartbeatFailures = 0;
+const MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE = 2;
+
+function initNetworkMonitor() {
+    window.addEventListener("online", () => {
+        console.log("[NetworkMonitor] Browser fired 'online' event");
+        checkNetworkNow();
+    });
+
+    window.addEventListener("offline", () => {
+        console.warn("[NetworkMonitor] Browser fired 'offline' event");
+        setNetworkState(false, "Kabel LAN atau Wi-Fi Anda terputus!");
+    });
+
+    if (!navigator.onLine) {
+        setNetworkState(false, "Perangkat Anda sedang offline.");
+    }
+}
+
+function setNetworkState(isOnline, reason = "") {
+    if (isNetworkOnline === isOnline) return;
+    isNetworkOnline = isOnline;
+
+    const badge = document.getElementById("network-status-badge");
+    const textEl = document.getElementById("network-status-text");
+    const banner = document.getElementById("offline-warning-banner");
+    const submitBtn = document.getElementById("btn-submit-answer");
+
+    if (isOnline) {
+        consecutiveHeartbeatFailures = 0;
+        if (badge) {
+            badge.className = "status-badge badge-online";
+            badge.title = "Koneksi jaringan dan server aktif stabil";
+        }
+        if (textEl) {
+            textEl.textContent = "Terkoneksi";
+        }
+        if (banner) {
+            banner.style.display = "none";
+        }
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.title = "Simpan query ini sebagai jawaban resmi";
+        }
+        showToast("Koneksi jaringan telah pulih kembali. Anda dapat melanjutkan ujian.", "success");
+    } else {
+        if (badge) {
+            badge.className = "status-badge badge-danger network-offline-badge";
+            badge.title = "Koneksi jaringan atau server terputus! Kueri Anda tetap aman di draf lokal.";
+        }
+        if (textEl) {
+            textEl.textContent = "Jaringan Terputus";
+        }
+        if (banner) {
+            banner.style.display = "block";
+        }
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.title = "Koneksi terputus. Harap tunggu hingga jaringan tersambung kembali.";
+        }
+        showToast(reason || "Peringatan: Koneksi jaringan terputus. Jangan me-refresh browser!", "danger");
+    }
+}
+
+async function checkNetworkNow() {
+    const badge = document.getElementById("network-status-badge");
+    const textEl = document.getElementById("network-status-text");
+    if (!isNetworkOnline && textEl) {
+        textEl.textContent = "Menghubungkan...";
+        if (badge) badge.className = "status-badge badge-warning";
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch("/api/student/heartbeat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                nim: studentNim,
+                session_token: studentSessionToken
+            }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+            const data = await res.json();
+            if (data.valid) {
+                setNetworkState(true);
+                return true;
+            }
+        }
+        setNetworkState(false, "Server ujian tidak merespon.");
+        return false;
+    } catch (e) {
+        setNetworkState(false, "Gagal menghubungi server ujian.");
+        return false;
+    }
+}
+
+window.checkNetworkNow = checkNetworkNow;
+window.setNetworkState = setNetworkState;
+window.getIsNetworkOnline = () => isNetworkOnline;
+
 // 1. CodeMirror SQL Editor Initialization
 // ==============================================================================
 function initCodeMirror() {
@@ -65,8 +297,17 @@ function initCodeMirror() {
             "Shift-Cmd-Enter": () => runQuery(true)
         }
     });
+    window.editor = editor;
 
     // Update Run button label dynamically when selection changes (Run Partial)
+    // Debounced autosave to localStorage on typing (Fase 1)
+    editor.on("change", (cm, changeObj) => {
+        if (changeObj && changeObj.origin === "setValue") {
+            return; // Ignore programmatic setValue
+        }
+        triggerDebouncedAutosave();
+    });
+
     editor.on("cursorActivity", () => {
         const sel = editor.getSelection().trim();
         const runText = document.getElementById("btn-run-text");
@@ -182,7 +423,32 @@ function _registerInternalCopy(text) {
 }
 
 function setupAntiCheat() {
-    // Track internal copy/cut across the IDE (editor, question descriptions, ERD, result table)
+    // 1. Prevent DevTools shortcuts & Inspect Element
+    document.addEventListener("keydown", (e) => {
+        const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+        const key = e.key ? e.key.toUpperCase() : "";
+
+        // F12 or Ctrl+Shift+I/J/C or Ctrl+U (source) or Ctrl+S (save)
+        if (
+            key === "F12" ||
+            (isCtrlOrCmd && e.shiftKey && (key === "I" || key === "J" || key === "C")) ||
+            (isCtrlOrCmd && (key === "U" || key === "S"))
+        ) {
+            e.preventDefault();
+            e.stopPropagation();
+            showToast("Akses pintasan Developer Tools dinonaktifkan!", "danger");
+            logCheatingAction("devtools_attempt", `Pintasan keyboard dicegah: ${e.code || e.key}`);
+            return false;
+        }
+    }, true);
+
+    // 2. Disable Right-Click Context Menu across exam interface
+    document.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showToast("Menu klik kanan dinonaktifkan selama ujian!", "warning");
+    }, true);
+
+    // 3. Track internal copy/cut across the IDE (editor, question descriptions, ERD, result table)
     document.addEventListener("copy", (e) => {
         let sel = "";
         if (editor && editor.hasFocus() && editor.somethingSelected()) {
@@ -247,9 +513,9 @@ function setupAntiCheat() {
         }
     });
 
-    // Detect tab/window switches
+    // 4. Detect tab/window switches
     document.addEventListener("visibilitychange", () => {
-        if (isLoggingOut) return;
+        if (isUserLoggingOut()) return;
         if (document.hidden) {
             showToast("Peringatan: Berpindah tab atau aplikasi dicatat oleh sistem!", "danger");
             logCheatingAction("blur_tab", "Mahasiswa memindahkan fokus tab atau keluar jendela ujian");
@@ -259,8 +525,105 @@ function setupAntiCheat() {
     });
 
     window.addEventListener("blur", () => {
-        if (isLoggingOut) return;
+        if (isUserLoggingOut()) return;
         logCheatingAction("blur_tab", "Window blur terdeteksi");
+    });
+
+    // 5. Fullscreen Guard & Enforcement
+    setupFullscreenGuard();
+}
+
+function setupFullscreenGuard() {
+    const overlay = document.getElementById("fullscreen-overlay");
+    const enterBtn = document.getElementById("btn-enter-fullscreen");
+
+    function isExamFullscreen() {
+        return Boolean(
+            document.fullscreenElement ||
+            document.webkitFullscreenElement ||
+            document.mozFullScreenElement ||
+            document.msFullscreenElement
+        );
+    }
+
+    function requestExamFullscreen() {
+        const elem = document.documentElement;
+        const requestMethod = elem.requestFullscreen ||
+                              elem.webkitRequestFullscreen ||
+                              elem.mozRequestFullScreen ||
+                              elem.msRequestFullscreen;
+        if (requestMethod) {
+            try {
+                const p = requestMethod.call(elem);
+                if (p && typeof p.then === "function") {
+                    p.then(() => {
+                        hideOverlay();
+                        if (editor) editor.refresh();
+                    }).catch((err) => {
+                        console.warn("Fullscreen request error:", err);
+                    });
+                }
+            } catch (err) {
+                console.warn("Fullscreen call error:", err);
+            }
+        }
+    }
+
+    function showOverlay() {
+        if (isUserLoggingOut()) return;
+        if (overlay) {
+            overlay.style.display = "flex";
+        }
+    }
+
+    function hideOverlay() {
+        if (overlay) {
+            overlay.style.display = "none";
+        }
+    }
+
+    if (enterBtn) {
+        enterBtn.addEventListener("click", () => {
+            requestExamFullscreen();
+        });
+    }
+
+    let hasEnteredFullscreenOnce = false;
+    let lastFullscreenExitLogTime = 0;
+
+    function handleFullscreenChange() {
+        if (isUserLoggingOut()) return;
+
+        if (isExamFullscreen()) {
+            hideOverlay();
+            hasEnteredFullscreenOnce = true;
+            if (editor) editor.refresh();
+        } else {
+            showOverlay();
+            const now = Date.now();
+            if (hasEnteredFullscreenOnce && now - lastFullscreenExitLogTime > 2500) {
+                lastFullscreenExitLogTime = now;
+                showToast("Peringatan: Keluar dari mode layar penuh dicatat sebagai pelanggaran!", "danger");
+                logCheatingAction("exit_fullscreen", "Mahasiswa keluar dari mode layar penuh (fullscreen)");
+            }
+        }
+    }
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+
+    // Initial check on load
+    if (!isExamFullscreen()) {
+        showOverlay();
+    }
+
+    window.addEventListener("resize", () => {
+        if (isUserLoggingOut()) return;
+        if (!isExamFullscreen()) {
+            showOverlay();
+        }
     });
 }
 
@@ -311,6 +674,7 @@ function setupExitModal() {
     if (proceedBtn) {
         proceedBtn.addEventListener("click", () => {
             isLoggingOut = true;
+            window.isLoggingOut = true;
         });
     }
 }
@@ -338,23 +702,45 @@ async function logCheatingAction(actionType, details) {
 function startHeartbeat() {
     heartbeatInterval = setInterval(async () => {
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000);
             const res = await fetch("/api/student/heartbeat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     nim: studentNim,
                     session_token: studentSessionToken
-                })
+                }),
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
+
             const data = await res.json();
+            consecutiveHeartbeatFailures = 0;
+            if (!isNetworkOnline) {
+                setNetworkState(true);
+            }
+
             if (!data.valid) {
                 clearInterval(heartbeatInterval);
                 showKickModal(data.reason || "NIM Anda sedang diakses dari perangkat lain!");
+            } else {
+                // Deteksi jika paket soal di-reset oleh pengawas
+                if (studentCategory && !data.selected_category) {
+                    studentCategory = "";
+                    updateHeaderPackageBadge(null);
+                    showToast("Pilihan paket soal Anda telah di-reset oleh pengawas. Silakan pilih paket baru.", "warning");
+                    loadQuestions();
+                }
             }
         } catch (err) {
-            console.warn("Heartbeat offline or network hiccup:", err);
+            consecutiveHeartbeatFailures++;
+            console.warn(`[Heartbeat] Probe failed (${consecutiveHeartbeatFailures}/${MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE}):`, err);
+            if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE || !navigator.onLine) {
+                setNetworkState(false, "Koneksi ke server ujian terputus!");
+            }
         }
-    }, 15000); // Check every 15 seconds
+    }, 12000); // Check every 12 seconds
 }
 
 function showKickModal(message) {
@@ -362,7 +748,7 @@ function showKickModal(message) {
         editor.setOption("readOnly", "nocursor");
     }
     const modalHtml = `
-        <div class="modal-backdrop" id="kick-modal" role="dialog" aria-modal="true">
+        <div class="modal-backdrop is-active" id="kick-modal" role="dialog" aria-modal="true" style="display: flex;">
             <div class="modal-dialog">
                 <div class="modal-header">
                     <h3 style="color: #ef4444;">Sesi Ditangguhkan (Kicked)</h3>
@@ -386,12 +772,26 @@ function showKickModal(message) {
 }
 
 // ==============================================================================
-// 4. Questions & Navigation
+// 4. Questions & Navigation (Multi-Category / Package Support)
 // ==============================================================================
 async function loadQuestions() {
     try {
         const res = await fetch(`/api/student/questions?token=${encodeURIComponent(studentSessionToken)}`);
         const data = await res.json();
+
+        // Mahasiswa belum mengunci paket soal
+        if (data.needs_category_selection) {
+            studentCategory = "";
+            updateHeaderPackageBadge(null);
+            showCategorySelectionModal(data.categories || []);
+            return;
+        }
+
+        // Mahasiswa sudah memiliki paket soal terkunci
+        hideCategorySelectionModal();
+        studentCategory = data.category || "";
+        updateHeaderPackageBadge(studentCategory);
+
         if (data.questions) {
             questionsData = data.questions;
             submissionsMap = data.submissions || {};
@@ -403,6 +803,140 @@ async function loadQuestions() {
     }
 }
 
+function updateHeaderPackageBadge(category) {
+    const container = document.getElementById("student-package-badge-container");
+    const badge = document.getElementById("student-package-badge");
+    if (!container || !badge) return;
+
+    if (category) {
+        badge.textContent = `Paket ${category}`;
+        container.style.display = "inline-flex";
+    } else {
+        container.style.display = "none";
+    }
+}
+
+function showCategorySelectionModal(categories) {
+    const modal = document.getElementById("category-select-modal");
+    const grid = document.getElementById("category-cards-grid");
+    if (!modal || !grid) return;
+
+    if (!categories || categories.length === 0) {
+        grid.innerHTML = `
+            <div style="text-align: center; color: var(--text-muted); padding: 2rem; grid-column: 1 / -1;">
+                <p style="font-size: 1rem; color: #f87171; margin-bottom: 0.5rem; font-weight: 600;">⚠️ Belum Ada Paket Soal Aktif</p>
+                <p style="font-size: 0.85rem;">Bank soal ujian belum memiliki paket soal aktif. Harap tunggu arahan pengawas ujian.</p>
+            </div>
+        `;
+        modal.style.display = "flex";
+        return;
+    }
+
+    grid.innerHTML = "";
+    categories.forEach(c => {
+        const cat = c.category;
+        const name = c.name || `Paket ${cat}`;
+        const desc = c.description || "";
+        const count = c.total_questions || 0;
+        const weight = c.total_weight || 0;
+
+        const card = document.createElement("div");
+        card.className = "pkg-card";
+        card.innerHTML = `
+            <div class="pkg-card-title">
+                <span style="font-weight: 800;">${escapeHtml(name)}</span>
+                <span style="font-size: 1.15rem; color: #818cf8;">&rarr;</span>
+            </div>
+            ${desc ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin: 0.35rem 0 0.5rem 0; line-height: 1.35; max-height: 2.8em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;" title="${escapeHtml(desc)}">${escapeHtml(desc)}</div>` : ''}
+            <div class="pkg-card-meta">
+                <span class="pkg-pill">${count} Soal</span>
+            </div>
+            <button type="button" class="btn btn-primary btn-sm" style="margin-top: 0.5rem; width: 100%; pointer-events: none;">
+                Pilih Paket Ini
+            </button>
+        `;
+        card.addEventListener("click", () => onSelectPackageClicked(cat, name));
+        grid.appendChild(card);
+    });
+
+    modal.style.display = "flex";
+}
+
+function hideCategorySelectionModal() {
+    const modal = document.getElementById("category-select-modal");
+    if (modal) modal.style.display = "none";
+    const confirmModal = document.getElementById("category-confirm-modal");
+    if (confirmModal) confirmModal.style.display = "none";
+    pendingCategorySelection = null;
+}
+
+function onSelectPackageClicked(category, displayName) {
+    pendingCategorySelection = category;
+    const nameEl = document.getElementById("confirm-package-name");
+    if (nameEl) nameEl.textContent = displayName || `Paket ${category}`;
+    const confirmModal = document.getElementById("category-confirm-modal");
+    if (confirmModal) confirmModal.style.display = "flex";
+}
+
+function cancelPackageSelection() {
+    const confirmModal = document.getElementById("category-confirm-modal");
+    if (confirmModal) confirmModal.style.display = "none";
+    pendingCategorySelection = null;
+}
+
+let isLockingPackage = false;
+
+async function confirmPackageSelection() {
+    if (isLockingPackage || !pendingCategorySelection) return;
+    isLockingPackage = true;
+    const cat = pendingCategorySelection;
+    const btn = document.getElementById("btn-proceed-lock-pkg");
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Mengunci...";
+    }
+
+    try {
+        const res = await fetch("/api/student/select-category", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                nim: studentNim,
+                session_token: studentSessionToken,
+                category: cat
+            })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === "success") {
+            studentCategory = cat;
+            hideCategorySelectionModal();
+            updateHeaderPackageBadge(cat);
+            questionsData = data.questions || [];
+            submissionsMap = {};
+            renderQuestionNav();
+            selectQuestion(0);
+            showToast(`Paket ${cat} berhasil dikunci! Selamat mengerjakan ujian.`, "success");
+        } else {
+            showToast(data.detail || data.message || "Gagal mengunci paket soal.", "danger");
+        }
+    } catch (err) {
+        console.error("Gagal mengunci paket:", err);
+        showToast("Terjadi gangguan koneksi saat memilih paket soal.", "danger");
+    } finally {
+        isLockingPackage = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = "Ya, Kunci Pilihan Saya";
+        }
+    }
+}
+
+// Expose modal handlers to window for template safety & testing
+window.onSelectPackageClicked = onSelectPackageClicked;
+window.cancelPackageSelection = cancelPackageSelection;
+window.confirmPackageSelection = confirmPackageSelection;
+window.loadQuestions = loadQuestions;
+
 function renderQuestionNav() {
     const container = document.getElementById("question-nav");
     if (!container) return;
@@ -412,8 +946,14 @@ function renderQuestionNav() {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = `q-btn ${idx === currentQuestionIndex ? "active" : ""}`;
-        if (submissionsMap[q.id]) {
+        const sub = submissionsMap[q.id];
+        if (sub) {
             btn.classList.add("submitted");
+            if (sub.is_correct === 1) {
+                btn.classList.add("submitted-correct");
+            } else {
+                btn.classList.add("submitted-wrong");
+            }
         }
         btn.textContent = q.question_number;
         btn.title = `Soal No. ${q.question_number}: ${q.title}`;
@@ -425,13 +965,25 @@ function renderQuestionNav() {
 function selectQuestion(idx) {
     if (idx < 0 || idx >= questionsData.length) return;
     
-    // Save current editor draft to memory before switching
-    if (questionsData[currentQuestionIndex]) {
-        questionsData[currentQuestionIndex].draftQuery = editor.getValue();
+    // Save current editor draft to memory and localStorage before switching (Fase 1)
+    if (currentQuestionIndex !== idx && questionsData[currentQuestionIndex] && editor) {
+        const curQ = questionsData[currentQuestionIndex];
+        const curVal = editor.getValue();
+        if (curVal && curVal.trim()) {
+            curQ.draftQuery = curVal;
+            saveLocalDraft(studentNim, curQ.id, curVal);
+        }
     }
 
     currentQuestionIndex = idx;
     const q = questionsData[idx];
+
+    // Smart Auto-Switch Database Connection to match Question Target
+    const targetDb = q.target_database || "pagila";
+    const currentDb = getActiveDatabase();
+    if (targetDb && targetDb !== currentDb) {
+        setActiveDatabase(targetDb, true /* isAutoSwitch */);
+    }
 
     // Update active button
     const buttons = document.querySelectorAll(".q-btn");
@@ -442,18 +994,46 @@ function selectQuestion(idx) {
     // Update question details in UI
     document.getElementById("q-number").textContent = `Soal No. ${q.question_number}`;
     document.getElementById("q-title").textContent = q.title;
-    document.getElementById("q-weight").textContent = `Bobot: ${q.score_weight} Poin`;
+    const weightEl = document.getElementById("q-weight");
+    if (weightEl) weightEl.style.display = "none";
     
     // Convert basic markdown/newlines to safe HTML
     document.getElementById("q-description").innerHTML = formatMarkdown(q.description);
 
-    // Populate editor with submitted query, draft, or clean placeholder
+    // Update Expected Output Table Screenshot Container (Fase 4)
+    const outputBox = document.getElementById("q-expected-output-box");
+    const outputImg = document.getElementById("q-expected-output-img");
+    if (outputBox && outputImg) {
+        const imgUrl = (q.expected_output_image || "").trim();
+        if (imgUrl) {
+            outputImg.src = imgUrl;
+            outputBox.style.display = "block";
+        } else {
+            outputImg.src = "";
+            outputBox.style.display = "none";
+        }
+    }
+
+    // Populate editor with submitted query, local draft, or clean placeholder (Fase 1)
     const existingSubmission = submissionsMap[q.id];
+    const localDraft = getLocalDraft(studentNim, q.id);
     let queryToLoad = "";
+    let isFromDraft = false;
+
     if (existingSubmission && existingSubmission.submitted_query) {
-        queryToLoad = existingSubmission.submitted_query;
+        // If there is an active local draft that differs from submitted query, prefer local draft
+        if (localDraft && localDraft.query && localDraft.query.trim() !== existingSubmission.submitted_query.trim()) {
+            queryToLoad = localDraft.query;
+            isFromDraft = true;
+        } else {
+            queryToLoad = existingSubmission.submitted_query;
+        }
+    } else if (localDraft && localDraft.query !== undefined) {
+        queryToLoad = localDraft.query;
+        isFromDraft = true;
     } else if (q.draftQuery !== undefined) {
         queryToLoad = q.draftQuery;
+        isFromDraft = true;
     } else {
         queryToLoad = `-- Jawaban Soal No. ${q.question_number}: ${q.title}\nSELECT \n`;
     }
@@ -462,15 +1042,45 @@ function selectQuestion(idx) {
     editor.focus();
     editor.setCursor(editor.lineCount(), 0);
 
-    // Update submission indicator tag
+    if (isFromDraft && localDraft) {
+        updateAutosaveUI("restored");
+    } else {
+        updateAutosaveUI("saved");
+    }
+
+    // Update submission indicator tag & autograder banner
     const subTag = document.getElementById("submission-status-tag");
-    if (subTag) {
-        if (existingSubmission) {
-            subTag.className = "status-badge badge-online";
-            subTag.textContent = "Sudah Disubmit";
+    const autoBanner = document.getElementById("autograder-banner");
+    if (existingSubmission) {
+        const isCorrect = existingSubmission.is_correct === 1;
+        const score = existingSubmission.score || 0;
+        const maxScore = q.score_weight || 20;
+
+        if (isCorrect) {
+            if (subTag) {
+                subTag.className = "status-badge badge-online";
+                subTag.textContent = "🟢 Terjawab";
+            }
         } else {
+            if (subTag) {
+                subTag.className = "status-badge badge-danger";
+                subTag.textContent = "🔴 Perlu Perbaikan";
+            }
+        }
+
+        if (existingSubmission.feedback) {
+            renderAutograderBanner(isCorrect, score, maxScore, existingSubmission.feedback);
+        } else if (autoBanner) {
+            autoBanner.style.display = "none";
+        }
+    } else {
+        if (subTag) {
             subTag.className = "status-badge badge-warning";
             subTag.textContent = "Belum Disubmit";
+        }
+        if (autoBanner) {
+            autoBanner.style.display = "none";
+            autoBanner.className = "autograder-banner";
         }
     }
 }
@@ -494,6 +1104,12 @@ async function runQuery(forcePartial = false) {
     const outputContainer = document.getElementById("output-content");
     const metaContainer = document.getElementById("output-meta-text");
 
+    // Hide autograder banner during scratchpad Run Query
+    const autoBanner = document.getElementById("autograder-banner");
+    if (autoBanner) {
+        autoBanner.style.display = "none";
+    }
+
     runBtn.disabled = true;
     outputContainer.innerHTML = `
         <div class="state-box">
@@ -504,13 +1120,15 @@ async function runQuery(forcePartial = false) {
     metaContainer.textContent = isPartial ? "Menjalankan (Partial)..." : "Menjalankan...";
 
     try {
+        const currentActiveDb = getActiveDatabase();
         const res = await fetch("/api/student/run-query", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 nim: studentNim,
                 session_token: studentSessionToken,
-                query: query
+                query: query,
+                active_database: currentActiveDb
             })
         });
         const data = await res.json();
@@ -520,6 +1138,16 @@ async function runQuery(forcePartial = false) {
             metaContainer.textContent = `${data.row_count} baris dikembalikan (${data.execution_time_ms} ms)${isPartial ? " • Run Partial" : ""}`;
             if (isPartial) {
                 showToast(`Partial run berhasil (${data.row_count} baris).`, "info");
+            }
+            if (data.virtual_db !== undefined) {
+                updateSandboxOptionLabel(data.virtual_db);
+            }
+            // If running DDL/DML or virtual DB on student sandbox, refresh ERD view
+            if (currentActiveDb === "sandbox_pribadi") {
+                const uq = query.toUpperCase();
+                if (uq.includes("CREATE TABLE") || uq.includes("DROP TABLE") || uq.includes("ALTER TABLE") || uq.includes("CREATE DATABASE") || uq.includes("USE ") || uq.includes("DROP DATABASE")) {
+                    loadErdSchema("sandbox_pribadi");
+                }
             }
         } else {
             outputContainer.innerHTML = `
@@ -543,7 +1171,43 @@ async function runQuery(forcePartial = false) {
     }
 }
 
-function renderResultTable(columns, rows, count, isTruncated) {
+function renderAutograderBanner(isCorrect, score, maxScore, feedback) {
+    const banner = document.getElementById("autograder-banner");
+    if (!banner) return;
+
+    banner.className = `autograder-banner ${isCorrect ? "banner-correct" : "banner-wrong"}`;
+    banner.style.display = "flex";
+
+    const titleText = isCorrect ? "JAWABAN BENAR!" : "OUTPUT BELUM SESUAI";
+    const titleClass = isCorrect ? "correct" : "wrong";
+    const scoreBadgeText = isCorrect ? "Tercatat di Sistem" : "Perlu Perbaikan";
+    const badgeClass = isCorrect ? "correct" : "wrong";
+    const iconSvg = isCorrect
+        ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+        : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+
+    const retryNotice = isCorrect 
+        ? `<div class="grader-retry-hint" style="color: #10b981;">Nilai soal ini telah tercatat dalam sistem penilaian ujian.</div>`
+        : `<div class="grader-retry-hint">Perbaiki query Anda di editor lalu klik <strong>Submit Answer</strong> kembali untuk mencoba lagi.</div>`;
+
+    banner.innerHTML = `
+        <div class="grader-top-row">
+            <div class="grader-verdict ${titleClass}">
+                ${iconSvg}
+                <span>${titleText}</span>
+            </div>
+            <div class="grader-score-badge ${badgeClass}">
+                ${scoreBadgeText}
+            </div>
+        </div>
+        <div class="grader-feedback-msg">
+            ${escapeHtml(feedback || (isCorrect ? "Kueri menghasilkan output yang sesuai." : "Hasil output kueri belum cocok."))}
+        </div>
+        ${retryNotice}
+    `;
+}
+
+function renderResultTable(columns, rows, count, isTruncated, evalMode = null) {
     const container = document.getElementById("output-content");
     if (!columns || columns.length === 0) {
         container.innerHTML = `
@@ -554,7 +1218,8 @@ function renderResultTable(columns, rows, count, isTruncated) {
         return;
     }
 
-    let html = `<div class="result-table-container"><table class="result-table"><thead><tr>`;
+    const evalClass = evalMode === "correct" ? "eval-correct" : (evalMode === "wrong" ? "eval-wrong" : "");
+    let html = `<div class="result-table-container ${evalClass}"><table class="result-table"><thead><tr>`;
     columns.forEach(col => {
         html += `<th>${escapeHtml(col)}</th>`;
     });
@@ -588,6 +1253,10 @@ function renderResultTable(columns, rows, count, isTruncated) {
 // 6. Answer Submission
 // ==============================================================================
 async function submitAnswer() {
+    if (!isNetworkOnline) {
+        showToast("Koneksi jaringan sedang terputus! Kueri Anda tetap aman di draf lokal. Menghubungkan ulang...", "danger");
+        return;
+    }
     const q = questionsData[currentQuestionIndex];
     if (!q) return;
 
@@ -598,9 +1267,18 @@ async function submitAnswer() {
     }
 
     const submitBtn = document.getElementById("btn-submit-answer");
+    const originalText = submitBtn.innerHTML;
     submitBtn.disabled = true;
+    submitBtn.innerHTML = `
+        <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 5px;"></span>
+        Mengevaluasi...
+    `;
+
+    const metaContainer = document.getElementById("output-meta-text");
+    metaContainer.textContent = "Sedang mengevaluasi jawaban...";
 
     try {
+        const currentActiveDb = getActiveDatabase();
         const res = await fetch("/api/student/submit", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -608,30 +1286,98 @@ async function submitAnswer() {
                 nim: studentNim,
                 session_token: studentSessionToken,
                 question_id: q.id,
-                query: query
+                query: query,
+                active_database: currentActiveDb
             })
         });
         const data = await res.json();
         if (data.status === "success") {
-            showToast(`Jawaban Soal No. ${q.question_number} berhasil disimpan!`, "success");
-            submissionsMap[q.id] = { submitted_query: query };
-            
-            // Update button visual
-            const activeBtn = document.querySelector(`.q-btn:nth-child(${currentQuestionIndex + 1})`);
-            if (activeBtn) activeBtn.classList.add("submitted");
+            const isCorrect = data.is_correct === true;
+            const score = data.score || 0;
+            const maxScore = data.max_score || q.score_weight;
 
+            // Cache submission in map & sync local draft (Fase 1)
+            submissionsMap[q.id] = {
+                submitted_query: query,
+                is_correct: isCorrect ? 1 : 0,
+                score: score,
+                eval_status: data.eval_status,
+                feedback: data.feedback
+            };
+            saveLocalDraft(studentNim, q.id, query);
+            updateAutosaveUI("saved");
+
+            // Update button visual in navigation grid
+            const buttons = document.querySelectorAll(".q-btn");
+            if (buttons[currentQuestionIndex]) {
+                const b = buttons[currentQuestionIndex];
+                b.classList.add("submitted");
+                if (isCorrect) {
+                    b.classList.add("submitted-correct");
+                    b.classList.remove("submitted-wrong");
+                } else {
+                    b.classList.add("submitted-wrong");
+                    b.classList.remove("submitted-correct");
+                }
+            }
+
+            // Update status tag in sidebar
             const subTag = document.getElementById("submission-status-tag");
             if (subTag) {
-                subTag.className = "status-badge badge-online";
-                subTag.textContent = "Sudah Disubmit";
+                if (isCorrect) {
+                    subTag.className = "status-badge badge-online";
+                    subTag.textContent = `🟢 Benar (+${score} Poin)`;
+                } else {
+                    subTag.className = "status-badge badge-danger";
+                    subTag.textContent = "🔴 Belum Sesuai (0 Poin)";
+                }
+            }
+
+            if (currentActiveDb === "sandbox_pribadi") {
+                loadErdSchema("sandbox_pribadi");
+            }
+            // Render auto-grader banner
+            renderAutograderBanner(isCorrect, score, maxScore, data.feedback);
+
+            // Render table output if columns exist, or error box
+            const outputContainer = document.getElementById("output-content");
+            if (data.eval_status === "syntax_error" && data.error) {
+                outputContainer.innerHTML = `
+                    <div class="state-box-error" style="border-left: 4px solid #ef4444; margin: 0.85rem;">
+                        <strong style="color: #ef4444;">Error Sintaks SQL:</strong><br>
+                        ${escapeHtml(data.error)}
+                    </div>
+                `;
+                metaContainer.textContent = `Query Error Sintaks • Evaluasi Gagal`;
+            } else if (data.columns && data.columns.length > 0) {
+                renderResultTable(data.columns, data.rows, data.row_count, false, isCorrect ? "correct" : "wrong");
+                metaContainer.textContent = `${data.row_count} baris • ${data.execution_time_ms} ms • Status: ${isCorrect ? "BENAR" : "BELUM SESUAI"}`;
+            } else {
+                outputContainer.innerHTML = `
+                    <div class="state-box state-box-empty" style="margin: 0.85rem;">
+                        <p>Kueri berhasil dieksekusi tetapi menghasilkan 0 baris kolom data.</p>
+                    </div>
+                `;
+                metaContainer.textContent = `0 baris • Status: ${isCorrect ? "BENAR" : "BELUM SESUAI"}`;
+            }
+
+            // Toast feedback
+            if (isCorrect) {
+                showToast(`🎉 Jawaban Soal No. ${q.question_number} BENAR! (+${score} Poin)`, "success");
+            } else {
+                showToast(`Jawaban Soal No. ${q.question_number} belum sesuai. Periksa feedback di bawah.`, "danger");
             }
         } else {
             showToast(data.message || "Gagal menyimpan jawaban.", "danger");
+            if (data.message && (data.message.includes("belum memilih paket") || data.message.includes("tidak sesuai dengan paket"))) {
+                loadQuestions();
+            }
         }
     } catch (err) {
         showToast("Gagal mengirim jawaban ke server.", "danger");
     } finally {
         submitBtn.disabled = false;
+        submitBtn.innerHTML = originalText;
     }
 }
 
@@ -657,35 +1403,174 @@ function initSidebarTabs() {
 }
 
 // ==============================================================================
-// 7c. ERD Schema Renderer
+// 7c. ERD Schema & pgAdmin-Style Database Connection Management
 // ==============================================================================
 let _erdSchemaCache = null;
 let _erdRelCache = [];
 let _erdShowRel = false;
+let _activeDbCache = "pagila";
 
-async function loadErdSchema() {
-    const container = document.getElementById("erd-cards-container");
-    if (!container) return;
+function initDatabaseSelector() {
+    const dbSelect = document.getElementById("db-connection-select");
+    if (!dbSelect) return;
 
-    try {
-        const res = await fetch("/api/student/schema-full", { credentials: "same-origin" });
-        if (!res.ok) { renderErdError(container); return; }
-        const data = await res.json();
-        _erdSchemaCache = data.schema || {};
-        _erdRelCache = data.relations || [];
-        renderErdCards(container, _erdSchemaCache, _erdRelCache);
-        bindErdSearch();
-        bindErdRelToggle();
-    } catch (_) {
-        renderErdError(container);
+    // Fetch available databases dynamically from backend
+    const nimParam = studentNim ? `?nim=${encodeURIComponent(studentNim)}` : "";
+    fetch(`/api/student/databases${nimParam}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data && data.status === "success" && data.databases) {
+                const currentVal = dbSelect.value || data.default || "pagila";
+                dbSelect.innerHTML = "";
+                data.databases.forEach(db => {
+                    const opt = document.createElement("option");
+                    opt.value = db.name;
+                    if (db.name === 'sandbox_pribadi' && db.virtual_db) {
+                        opt.textContent = `sandbox_pribadi (${db.virtual_db})`;
+                    } else {
+                        opt.textContent = `${db.name} (${db.type === 'sandbox_student' ? 'Easy DDL/DML' : 'Master'})`;
+                    }
+                    opt.title = db.description || "";
+                    if (db.name === currentVal) opt.selected = true;
+                    dbSelect.appendChild(opt);
+                });
+                _activeDbCache = dbSelect.value;
+            }
+        })
+        .catch(err => {
+            console.warn("Menggunakan opsi database lokal:", err);
+        });
+
+    dbSelect.addEventListener("change", (e) => {
+        const chosenDb = e.target.value;
+        setActiveDatabase(chosenDb, false /* manual switch */);
+    });
+}
+
+function updateSandboxOptionLabel(virtualDb) {
+    const dbSelect = document.getElementById("db-connection-select");
+    if (!dbSelect) return;
+    const opt = dbSelect.querySelector('option[value="sandbox_pribadi"]');
+    if (opt) {
+        opt.textContent = virtualDb ? `sandbox_pribadi (${virtualDb})` : `sandbox_pribadi (Easy DDL/DML)`;
     }
 }
 
-function renderErdError(container) {
-    container.innerHTML = '<div style="padding:1rem;color:var(--danger,#ef4444);font-size:.82rem;">Gagal memuat schema ERD. Pastikan database sudah diinisialisasi.</div>';
+function getActiveDatabase() {
+    const dbSelect = document.getElementById("db-connection-select");
+    return (dbSelect ? dbSelect.value : _activeDbCache) || "pagila";
 }
 
-function renderErdCards(container, schema, relations) {
+function updateDbConnectionStatus(status, dbName) {
+    const pill = document.getElementById("db-status-pill");
+    const text = document.getElementById("db-status-text");
+    if (!pill || !text) return;
+
+    pill.classList.remove("connecting", "error");
+    if (status === "connecting") {
+        pill.classList.add("connecting");
+        text.textContent = "Connecting...";
+    } else if (status === "error") {
+        pill.classList.add("error");
+        text.textContent = "Disconnected";
+    } else {
+        text.textContent = "Connected";
+    }
+}
+
+function updateCodeMirrorHints(schema) {
+    if (!editor || !schema) return;
+    const cmTables = {};
+    Object.keys(schema).forEach(tbl => {
+        cmTables[tbl] = (schema[tbl] || []).map(col => col.name);
+    });
+    editor.setOption("hintOptions", { tables: cmTables });
+}
+
+async function setActiveDatabase(dbName, isAutoSwitch = false) {
+    const dbSelect = document.getElementById("db-connection-select");
+    const previousDb = _activeDbCache;
+    _activeDbCache = dbName;
+
+    if (dbSelect && dbSelect.value !== dbName) {
+        let exists = Array.from(dbSelect.options).some(o => o.value === dbName);
+        if (!exists) {
+            const opt = document.createElement("option");
+            opt.value = dbName;
+            opt.textContent = `${dbName} (${dbName === 'sandbox_pribadi' ? 'Easy DDL/DML' : 'Master'})`;
+            dbSelect.appendChild(opt);
+        }
+        dbSelect.value = dbName;
+    }
+
+    updateDbConnectionStatus("connecting", dbName);
+
+    try {
+        await loadErdSchema(dbName);
+        updateDbConnectionStatus("connected", dbName);
+        if (isAutoSwitch) {
+            showToast(`Koneksi database otomatis disesuaikan ke '${dbName}'.`, "info");
+        } else if (previousDb !== dbName) {
+            showToast(`Koneksi database aktif dialihkan ke '${dbName}'.`, "info");
+        }
+    } catch (_) {
+        updateDbConnectionStatus("error", dbName);
+        showToast(`Gagal terhubung ke database '${dbName}'.`, "danger");
+    }
+}
+
+async function loadErdSchema(dbName) {
+    const container = document.getElementById("erd-cards-container");
+    if (!container) return;
+
+    const targetDb = dbName || getActiveDatabase();
+    _activeDbCache = targetDb;
+
+    // Update ERD Header info
+    const dbNameLabel = document.getElementById("erd-active-db-name");
+    const countBadge = document.getElementById("erd-table-count-badge");
+    if (dbNameLabel) dbNameLabel.textContent = targetDb;
+    if (countBadge) countBadge.textContent = "Memuat...";
+
+    container.innerHTML = `
+        <div style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+            <div class="spinner" style="margin: 0 auto 0.5rem auto; width: 22px; height: 22px; border-width: 2px;"></div>
+            Memuat skema '${escapeHtml(targetDb)}'...
+        </div>
+    `;
+
+    try {
+        const res = await fetch(`/api/student/schema-full?db=${encodeURIComponent(targetDb)}`, { credentials: "same-origin" });
+        if (!res.ok) { renderErdError(container, targetDb); return; }
+        const data = await res.json();
+        _erdSchemaCache = data.schema || {};
+        _erdRelCache = data.relations || [];
+
+        renderErdCards(container, _erdSchemaCache, _erdRelCache, targetDb);
+        bindErdSearch();
+        bindErdRelToggle();
+
+        const tableCount = Object.keys(_erdSchemaCache).length;
+        if (countBadge) countBadge.textContent = `${tableCount} Tabel`;
+        if (dbNameLabel) {
+            dbNameLabel.textContent = data.virtual_db ? `${targetDb} (${data.virtual_db})` : targetDb;
+        }
+        if (targetDb === "sandbox_pribadi") {
+            updateSandboxOptionLabel(data.virtual_db);
+        }
+
+        // Synchronize CodeMirror autocomplete with this database's tables & columns
+        updateCodeMirrorHints(_erdSchemaCache);
+    } catch (_) {
+        renderErdError(container, targetDb);
+    }
+}
+
+function renderErdError(container, dbName) {
+    container.innerHTML = `<div style="padding:1rem;color:var(--danger,#ef4444);font-size:.82rem;">Gagal memuat schema untuk database '${escapeHtml(dbName || '')}'. Pastikan service PostgreSQL aktif.</div>`;
+}
+
+function renderErdCards(container, schema, relations, currentDb = "pagila") {
     container.innerHTML = "";
 
     // Build quick lookup: table -> [incoming FKs], table -> [outgoing FKs]
@@ -702,6 +1587,24 @@ function renderErdCards(container, schema, relations) {
     });
 
     const tableNames = Object.keys(schema).sort();
+
+    if (tableNames.length === 0) {
+        if (currentDb === "sandbox_pribadi") {
+            container.innerHTML = `
+                <div style="padding: 1.5rem 1rem; text-align: center; color: var(--text-muted); font-size: 0.82rem; line-height: 1.5;">
+                    <p style="font-weight: 600; color: var(--text-main); margin-bottom: 0.35rem;">📦 Kamar Sandbox Pribadi</p>
+                    <p>Belum ada tabel di skema pribadi Anda. Jalankan perintah <code>CREATE DATABASE</code> atau <code>CREATE TABLE</code> pada Soal Easy untuk membuat database dan tabel baru.</p>
+                </div>
+            `;
+        } else {
+            container.innerHTML = `
+                <div style="padding: 1.5rem 1rem; text-align: center; color: var(--text-muted); font-size: 0.82rem;">
+                    Belum ada tabel pada database '${escapeHtml(currentDb)}'.
+                </div>
+            `;
+        }
+        return;
+    }
 
     tableNames.forEach(tbl => {
         const cols = schema[tbl];
@@ -1698,3 +2601,56 @@ function _shortT(t) {
     };
     return m[t] || (t && t.length > 9 ? t.slice(0, 9) + '..' : t);
 }
+
+    // Expose only non-sensitive visualizer utilities to global window for inline modal/diagram buttons
+    window.openErdDiagram = openErdDiagram;
+    window.closeErdDiagram = closeErdDiagram;
+    window.erdZoomIn = erdZoomIn;
+    window.erdZoomOut = erdZoomOut;
+    window.erdResetView = erdResetView;
+    window.erdResetLayout = erdResetLayout;
+})();
+
+// ==============================================================================
+// 7d. Image Lightbox Modal for Expected Output Table (Fase 4)
+// ==============================================================================
+function initImageLightbox() {
+    const previewWrap = document.getElementById("q-expected-output-preview-wrap");
+    const hintBtn = document.getElementById("btn-zoom-hint");
+    const lightboxModal = document.getElementById("image-lightbox-modal");
+    const lightboxImg = document.getElementById("image-lightbox-img");
+    const closeBtn = document.getElementById("btn-close-lightbox");
+    const overlay = document.getElementById("image-lightbox-overlay");
+
+    if (!lightboxModal || !lightboxImg) return;
+
+    function openLightbox() {
+        const src = document.getElementById("q-expected-output-img")?.src;
+        if (src && !src.endsWith("/") && src !== window.location.href) {
+            lightboxImg.src = src;
+            lightboxModal.style.display = "flex";
+        }
+    }
+
+    function closeLightbox() {
+        lightboxModal.style.display = "none";
+    }
+
+    previewWrap?.addEventListener("click", openLightbox);
+    hintBtn?.addEventListener("click", openLightbox);
+    closeBtn?.addEventListener("click", closeLightbox);
+    overlay?.addEventListener("click", closeLightbox);
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && lightboxModal.style.display !== "none") {
+            closeLightbox();
+        }
+    });
+}
+
+window.checkNetworkNow = checkNetworkNow;
+window.setNetworkState = setNetworkState;
+window.getIsNetworkOnline = () => isNetworkOnline;
+
+window.selectQuestion = selectQuestion;
+window.getActiveDatabase = getActiveDatabase;

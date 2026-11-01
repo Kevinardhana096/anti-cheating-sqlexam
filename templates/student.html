@@ -1,511 +1,1472 @@
 <!DOCTYPE html>
+
 <html lang="id" data-theme="dracula">
 
+
+
 <head>
+
     <meta charset="UTF-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>Lembar Ujian Praktikum Basis Data</title>
+
     <!-- Apply saved theme before CSS renders -->
+
     <script>(function () { var t = localStorage.getItem("exam_global_theme") || "dracula"; document.documentElement.setAttribute("data-theme", t); })();</script>
+
     <!-- 100% Offline Assets: Self-Hosted CodeMirror & Styles -->
+
     <link rel="stylesheet" href="/static/vendor/codemirror/lib/codemirror.css">
+
     <!-- Theme stylesheets (popular IDE themes) -->
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/dracula.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/monokai.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/nord.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/material-darker.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/darcula.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/gruvbox-dark.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/solarized.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/tomorrow-night-bright.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/ayu-dark.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/cobalt.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/oceanic-next.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/panda-syntax.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/night.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/theme/twilight.css">
+
     <link rel="stylesheet" href="/static/vendor/codemirror/addon/hint/show-hint.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+
+    <link rel="stylesheet" href="/static/css/style.css?v=20261101_v5">
+
     <style>
+
         /* ---- Sidebar Tab System ---- */
+
         .sidebar-panel { display: flex; flex-direction: column; overflow: hidden; }
+
         .sidebar-tab-nav {
+
             display: flex;
+
             border-bottom: 1px solid var(--border-subtle);
+
             background-color: var(--bg-surface);
+
             flex-shrink: 0;
+
         }
+
         .sidebar-tab-btn {
+
             flex: 1;
+
             padding: .55rem .5rem;
+
             font-size: .78rem;
+
             font-weight: 600;
+
             background: none;
+
             border: none;
+
             border-bottom: 2px solid transparent;
+
             color: var(--text-muted);
+
             cursor: pointer;
+
             transition: color .15s ease, border-color .15s ease;
+
             font-family: var(--font-sans);
+
             white-space: nowrap;
+
         }
+
         .sidebar-tab-btn:hover { color: var(--text-main); }
+
         .sidebar-tab-btn.active {
+
             color: var(--accent);
+
             border-bottom-color: var(--accent);
+
         }
+
         .sidebar-tab-pane { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+
         .sidebar-tab-pane.active { display: flex; }
 
+
+
         /* ---- ERD Panel ---- */
+
         .erd-pane { background-color: var(--bg-app); }
+
         .erd-toolbar {
+
             display: flex;
-            gap: .4rem;
+
+            flex-direction: column;
+
+            gap: .45rem;
+
+            padding: .6rem .75rem;
+
+            border-bottom: 1px solid var(--border-subtle);
+
+            background-color: var(--bg-surface);
+
+            flex-shrink: 0;
+
+        }
+
+        .erd-db-header {
+
+            display: flex;
+
+            justify-content: space-between;
+
             align-items: center;
-            padding: .6rem .65rem;
-            border-bottom: 1px solid var(--border-subtle);
-            background-color: var(--bg-surface);
-            flex-shrink: 0;
+
+            width: 100%;
+
+            gap: 0.5rem;
+
         }
-        .erd-search-input {
-            flex: 1;
-            background-color: var(--bg-app);
-            border: 1px solid var(--border-subtle);
-            border-radius: var(--radius-sm);
-            padding: .3rem .6rem;
-            font-size: .78rem;
-            color: var(--text-main);
-            font-family: var(--font-sans);
-            outline: none;
-            transition: border-color .15s ease;
-        }
-        .erd-search-input:focus { border-color: var(--accent); }
-        .erd-search-input::placeholder { color: var(--text-subtle); }
-        .erd-rel-legend {
+
+        .erd-controls-row {
+
             display: flex;
-            gap: .75rem;
-            padding: .35rem .65rem;
-            border-bottom: 1px solid var(--border-subtle);
-            background-color: var(--bg-surface);
-            flex-shrink: 0;
-            flex-wrap: wrap;
+
+            gap: .4rem;
+
+            align-items: center;
+
+            width: 100%;
+
         }
-        .erd-legend-row { display: flex; align-items: center; gap: .35rem; font-size: .68rem; color: var(--text-muted); }
-        .erd-leg-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-        .erd-cards-container {
+
+        .erd-search-input {
+
             flex: 1;
-            overflow-y: auto;
-            overflow-x: hidden;
-            padding: .65rem;
-            display: block;          /* block, not flex — prevents cards from being flex-shrunk */
-            min-height: 0;
-            position: relative;
+
+            background-color: var(--bg-app);
+
+            border: 1px solid var(--border-subtle);
+
+            border-radius: var(--radius-sm);
+
+            padding: .3rem .6rem;
+
+            font-size: .78rem;
+
+            color: var(--text-main);
+
+            font-family: var(--font-sans);
+
+            outline: none;
+
+            transition: border-color .15s ease;
+
         }
+
+        .erd-search-input:focus { border-color: var(--accent); }
+
+        .erd-search-input::placeholder { color: var(--text-subtle); }
+
+        .erd-rel-legend {
+
+            display: flex;
+
+            gap: .75rem;
+
+            padding: .35rem .65rem;
+
+            border-bottom: 1px solid var(--border-subtle);
+
+            background-color: var(--bg-surface);
+
+            flex-shrink: 0;
+
+            flex-wrap: wrap;
+
+        }
+
+        .erd-legend-row { display: flex; align-items: center; gap: .35rem; font-size: .68rem; color: var(--text-muted); }
+
+        .erd-leg-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+        .erd-cards-container {
+
+            flex: 1;
+
+            overflow-y: auto;
+
+            overflow-x: hidden;
+
+            padding: .65rem;
+
+            display: block;          /* block, not flex — prevents cards from being flex-shrunk */
+
+            min-height: 0;
+
+            position: relative;
+
+        }
+
         .erd-cards-container::-webkit-scrollbar { width: 4px; }
+
         .erd-cards-container::-webkit-scrollbar-thumb { background-color: var(--border-subtle); border-radius: 4px; }
 
+
+
         /* ERD Table Card */
+
         .erd-table-card {
+
             background-color: var(--bg-surface);
+
             border: 1px solid var(--border-subtle);
+
             border-radius: var(--radius-md);
+
             overflow: hidden;
+
             transition: border-color .15s ease;
+
             flex-shrink: 0;          /* never shrink if somehow in a flex context */
+
             margin-bottom: .55rem;   /* gap between cards (replaces flex gap) */
+
         }
+
         .erd-table-card:last-child { margin-bottom: 0; }
+
         .erd-table-card.has-rel { border-color: var(--primary); }
+
         .erd-table-card.erd-hidden { display: none; }
+
         .erd-table-header {
+
             display: flex;
+
             align-items: center;
+
             justify-content: space-between;
+
             padding: .45rem .65rem;
+
             background-color: var(--bg-surface-elevated);
+
             cursor: pointer;
+
             user-select: none;
+
             border-bottom: 1px solid var(--border-subtle);
+
             gap: .5rem;
+
         }
+
         .erd-table-name {
+
             font-size: .8rem;
+
             font-weight: 700;
+
             color: var(--text-main);
+
             font-family: var(--font-mono);
+
             flex: 1;
+
             min-width: 0;
+
             overflow: hidden;
+
             text-overflow: ellipsis;
+
             white-space: nowrap;
+
         }
+
         .erd-table-count {
+
             font-size: .65rem;
+
             color: var(--text-subtle);
+
             flex-shrink: 0;
+
         }
+
         .erd-table-toggle {
+
             font-size: .7rem;
+
             color: var(--text-subtle);
+
             flex-shrink: 0;
+
             transition: transform .15s ease;
+
         }
+
         .erd-table-card.open .erd-table-toggle { transform: rotate(180deg); }
+
         .erd-col-list {
+
             display: none;
+
         }
+
         .erd-table-card.open .erd-col-list { display: block; }
+
         .erd-col-row {
+
             display: flex;
+
             align-items: center;
+
             gap: .35rem;
+
             padding: .28rem .65rem;
+
             border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
+
             cursor: pointer;
+
             transition: background-color .12s ease;
+
             font-size: .76rem;
+
         }
+
         .erd-col-row:last-child { border-bottom: none; }
+
         .erd-col-row:hover { background-color: var(--bg-surface-elevated); }
+
         .erd-col-row.erd-highlight { background-color: color-mix(in srgb, var(--accent) 12%, transparent); }
+
         .erd-col-name {
+
             font-family: var(--font-mono);
+
             color: var(--text-main);
+
             flex: 1;
+
             min-width: 0;
+
             overflow: hidden;
+
             text-overflow: ellipsis;
+
             white-space: nowrap;
+
         }
+
         .erd-col-type {
+
             font-size: .67rem;
+
             color: var(--text-subtle);
+
             flex-shrink: 0;
+
         }
+
         .erd-badge {
+
             font-size: .6rem;
+
             font-weight: 700;
+
             padding: .1rem .3rem;
+
             border-radius: 3px;
+
             flex-shrink: 0;
+
             text-transform: uppercase;
+
             letter-spacing: .03em;
+
         }
+
         .erd-badge-pk { background-color: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+
         .erd-badge-fk { background-color: color-mix(in srgb, var(--primary) 20%, transparent); color: var(--primary); }
+
         .erd-badge-nn { background-color: color-mix(in srgb, var(--text-subtle) 15%, transparent); color: var(--text-subtle); }
 
+
+
         /* ERD Relation Badges under table header */
+
         .erd-rel-tags {
+
             display: flex;
+
             flex-wrap: wrap;
+
             gap: .25rem;
+
             padding: .3rem .65rem;
+
             border-bottom: 1px solid var(--border-subtle);
+
             background-color: color-mix(in srgb, var(--primary) 5%, transparent);
+
         }
+
         .erd-rel-tag {
+
             font-size: .67rem;
+
             color: var(--primary);
+
             background-color: color-mix(in srgb, var(--primary) 12%, transparent);
+
             border-radius: 3px;
+
             padding: .1rem .35rem;
+
             font-family: var(--font-mono);
+
         }
+
         .erd-canvas {
+
             position: absolute;
+
             top: 0; left: 0;
+
             pointer-events: none;
+
             z-index: 10;
+
         }
+
+
+
+        /* Package Selection Cards */
+
+        .pkg-card {
+
+            background: var(--bg-surface);
+
+            border: 1px solid var(--border-subtle);
+
+            border-radius: var(--radius-md);
+
+            padding: 1.25rem;
+
+            cursor: pointer;
+
+            transition: all 0.2s ease;
+
+            text-align: left;
+
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 0.75rem;
+
+        }
+
+        .pkg-card:hover {
+
+            border-color: #6366f1;
+
+            transform: translateY(-2px);
+
+            box-shadow: 0 8px 16px -4px rgba(99, 102, 241, 0.25);
+
+        }
+
+        .pkg-card-title {
+
+            font-size: 1.15rem;
+
+            font-weight: 700;
+
+            color: var(--text-main);
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: space-between;
+
+        }
+
+        .pkg-card-meta {
+
+            display: flex;
+
+            gap: 0.5rem;
+
+            align-items: center;
+
+        }
+
+        .pkg-pill {
+
+            background: rgba(99, 102, 241, 0.12);
+
+            color: #818cf8;
+
+            border: 1px solid rgba(99, 102, 241, 0.25);
+
+            padding: 2px 8px;
+
+            border-radius: 4px;
+
+            font-size: 0.75rem;
+
+            font-weight: 600;
+
+        }
+
     </style>
+
 </head>
 
+
+
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none;">
+
     <symbol id="si-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
         <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+
         <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+
     </symbol>
+
     <symbol id="si-db" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
         <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+
     </symbol>
+
     <symbol id="si-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+
         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+
     </symbol>
+
     <symbol id="si-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
         <polyline points="6 9 12 15 18 9"/>
+
     </symbol>
+
 </svg>
 
-<body data-nim="{{ user.nim }}" data-token="{{ user.session_token }}">
+
+
+<body data-nim="{{ user.nim }}" data-token="{{ user.session_token }}" data-category="{{ user.selected_category or '' }}">
+
+
 
     <!-- Header Navigation -->
+
     <header class="app-header">
+
         <div class="brand-wrapper">
+
             <span class="brand-logo-badge">EXAM IDE</span>
+
             <div class="brand-title">Ujian Praktikum Basis Data</div>
-            <span class="status-badge badge-online">Terkoneksi</span>
+
+            <span id="network-status-badge" class="status-badge badge-online" title="Koneksi jaringan dan server aktif stabil">
+                <span class="network-status-dot"></span>
+                <span id="network-status-text">Terkoneksi</span>
+            </span>
+
         </div>
+
+
 
         <div class="header-meta">
+
             <div class="user-tag">
+
                 <span>NIM: <strong>{{ user.nim }}</strong></span>
+
                 <span style="color: var(--text-subtle);">|</span>
+
                 <span>{{ user.name }}</span>
+
             </div>
+
+            <div id="student-package-badge-container" class="user-tag" style="display: none; align-items: center; gap: 0.35rem;">
+
+                <span style="color: var(--text-muted); font-size: 0.75rem;">Paket:</span>
+
+                <span id="student-package-badge" style="background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 0.78rem;">
+
+                    -
+
+                </span>
+
+            </div>
+
             <div class="user-tag" title="Alamat IP Perangkat Anda">
+
                 <code>{{ user.ip_address }}</code>
+
             </div>
+
             <!-- Global Theme Switcher -->
+
             <div class="global-theme-switcher" title="Ganti tema tampilan">
+
                 <span class="global-theme-icon">Theme</span>
+
                 <select id="global-theme-select" class="global-theme-select" aria-label="Pilih Tema">
+
                     <option value="dracula">Dracula</option>
+
                     <option value="monokai">Monokai</option>
+
                     <option value="nord">Nord</option>
+
                     <option value="material">Material Darker</option>
+
                     <option value="gruvbox">Gruvbox Dark</option>
+
                     <option value="solarized">Solarized Dark</option>
+
                     <option value="ayu">Ayu Dark</option>
+
                     <option value="light">Light Mode</option>
+
                 </select>
+
             </div>
+
             <button type="button" class="btn btn-secondary btn-sm" id="btn-logout-trigger" onclick="openExitModal()">
+
                 Keluar
+
             </button>
+
         </div>
+
     </header>
 
+    <!-- Offline Warning Floating Banner (Fase 2) -->
+    <div id="offline-warning-banner" class="offline-warning-banner" style="display: none;" role="alert">
+        <div class="offline-banner-content">
+            <span class="offline-banner-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                    <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path>
+                    <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path>
+                    <path d="M10.71 5.05A16 16 0 0 1 22.58 9"></path>
+                    <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path>
+                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                    <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                </svg>
+            </span>
+            <div class="offline-banner-text">
+                <strong>Koneksi Jaringan Terputus!</strong>
+                <span>Jangan me-refresh halaman (F5). Kueri Anda tetap <strong>tersimpan aman di draf lokal</strong>. Sistem sedang mencoba menyambungkan ulang otomatis...</span>
+            </div>
+            <button type="button" class="offline-retry-btn" onclick="checkNetworkNow()">
+                ⟳ Coba Sambung Sekarang
+            </button>
+        </div>
+    </div>
+
+
+
+
+
     <!-- IDE Container -->
+
     <main class="ide-container">
 
+
+
         <!-- Left Panel: Tabs (Soal | ERD Schema) -->
+
         <aside class="sidebar-panel" id="sidebar-panel">
 
+
+
             <!-- Tab Nav -->
+
             <div class="sidebar-tab-nav" id="sidebar-tab-nav" role="tablist">
+
                 <button type="button" class="sidebar-tab-btn active" data-tab="soal" role="tab" id="tab-btn-soal" aria-selected="true" aria-controls="tab-pane-soal">
+
                     <svg width="13" height="13" style="display:inline-block;vertical-align:middle;margin-right:4px;"><use href="#si-list"/></svg>
+
                     Soal
+
                 </button>
+
                 <button type="button" class="sidebar-tab-btn" data-tab="erd" role="tab" id="tab-btn-erd" aria-selected="false" aria-controls="tab-pane-erd">
+
                     <svg width="13" height="13" style="display:inline-block;vertical-align:middle;margin-right:4px;"><use href="#si-db"/></svg>
+
                     ERD Schema
+
                 </button>
+
             </div>
+
+
 
             <!-- Tab 1: Soal -->
+
             <div id="tab-pane-soal" role="tabpanel" aria-labelledby="tab-btn-soal" class="sidebar-tab-pane active">
+
                 <div class="sidebar-header">
+
                     <span style="font-weight:600;font-size:.85rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);">Daftar Soal</span>
+
                     <span id="submission-status-tag" class="status-badge badge-warning">Belum Disubmit</span>
+
                 </div>
+
                 <div class="question-nav-grid" id="question-nav"></div>
+
                 <div class="question-content-pane">
+
                     <div class="question-title-card">
+
                         <span id="q-number" style="font-size:.8rem;font-weight:600;color:var(--accent);text-transform:uppercase;">Soal No. 1</span>
+
                         <h3 id="q-title">Memuat Soal...</h3>
-                        <span class="weight-pill" id="q-weight">Bobot: - Poin</span>
+
                     </div>
+
                     <div class="question-description-body" id="q-description">
+
                         <p>Silakan pilih nomor soal di atas untuk membaca instruksi query.</p>
+
                     </div>
+
+
+
+                    <!-- Kontainer Ekspektasi Output Tabel Acuan Dosen (Fase 4) -->
+
+                    <div id="q-expected-output-box" class="expected-output-box" style="display: none;">
+
+                        <div class="expected-output-header">
+
+                            <span class="expected-output-title">
+
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+
+                                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+
+                                    <polyline points="21 15 16 10 5 21"></polyline>
+
+                                </svg>
+
+                                Ekspektasi Output Tabel
+
+                            </span>
+
+                            <span class="expected-output-hint" id="btn-zoom-hint">
+
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+
+                                Klik untuk memperbesar
+
+                            </span>
+
+                        </div>
+
+                        <div class="expected-output-preview-wrap" id="q-expected-output-preview-wrap" title="Klik untuk melihat tabel acuan dalam ukuran penuh">
+
+                            <img id="q-expected-output-img" class="expected-output-img" src="" alt="Ekspektasi Output Tabel Acuan Dosen" />
+
+                        </div>
+
+                    </div>
+
                 </div>
+
             </div>
 
+
+
             <!-- Tab 2: ERD Schema -->
+
             <div id="tab-pane-erd" role="tabpanel" aria-labelledby="tab-btn-erd" class="sidebar-tab-pane erd-pane" style="display:none;">
+
                 <div class="erd-toolbar">
-                    <input type="search" id="erd-search" class="erd-search-input" placeholder="Cari tabel atau kolom..." autocomplete="off">
-                    <button type="button" class="btn btn-secondary btn-sm" id="erd-toggle-rel" title="Tampilkan/sembunyikan tag relasi" style="padding:.3rem .55rem;">
-                        <svg width="14" height="14"><use href="#si-link"/></svg>
-                    </button>
-                    <button type="button" class="btn btn-primary btn-sm" id="btn-open-erd-diagram" title="Buka diagram ERD visual" style="padding:.3rem .65rem;display:flex;align-items:center;gap:.35rem;">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="18" y="3" width="4" height="4" rx="1"/><rect x="6" y="17" width="4" height="4" rx="1"/><rect x="14" y="17" width="4" height="4" rx="1"/><line x1="4" y1="7" x2="4" y2="14"/><line x1="12" y1="7" x2="12" y2="14"/><line x1="20" y1="7" x2="20" y2="14"/><line x1="4" y1="14" x2="20" y2="14"/><line x1="8" y1="17" x2="8" y2="14"/><line x1="16" y1="17" x2="16" y2="14"/></svg>
-                        Diagram
-                    </button>
+
+                    <div class="erd-db-header">
+
+                        <span style="font-size:0.75rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;">
+
+                            Database: <strong id="erd-active-db-name" style="color:var(--accent);">pagila</strong>
+
+                        </span>
+
+                        <span id="erd-table-count-badge" class="badge" style="font-size:0.7rem; background:rgba(99,102,241,0.15); color:var(--primary); padding:0.15rem 0.45rem; border-radius:4px; flex-shrink:0;">Memuat...</span>
+
+                    </div>
+
+                    <div class="erd-controls-row">
+
+                        <input type="search" id="erd-search" class="erd-search-input" placeholder="Cari tabel atau kolom..." autocomplete="off">
+
+                        <button type="button" class="btn btn-secondary btn-sm" id="erd-toggle-rel" title="Tampilkan/sembunyikan relasi FK-PK" style="padding:.3rem .55rem; flex-shrink:0;">
+
+                            <svg width="14" height="14"><use href="#si-link"/></svg>
+
+                        </button>
+
+                        <button type="button" class="btn btn-primary btn-sm" id="btn-open-erd-diagram" title="Buka diagram visual ERD" style="padding:.3rem .65rem; display:flex; align-items:center; gap:.35rem; flex-shrink:0;">
+
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="18" y="3" width="4" height="4" rx="1"/><rect x="6" y="17" width="4" height="4" rx="1"/><rect x="14" y="17" width="4" height="4" rx="1"/><line x1="4" y1="7" x2="4" y2="14"/><line x1="12" y1="7" x2="12" y2="14"/><line x1="20" y1="7" x2="20" y2="14"/><line x1="4" y1="14" x2="20" y2="14"/><line x1="8" y1="17" x2="8" y2="14"/><line x1="16" y1="17" x2="16" y2="14"/></svg>
+
+                            Diagram
+
+                        </button>
+
+                    </div>
+
                 </div>
+
                 <div class="erd-rel-legend" id="erd-rel-legend" style="display:none;">
+
                     <div class="erd-legend-row"><span class="erd-leg-dot" style="background:var(--primary);"></span>FK → PK (Many-to-One)</div>
+
                 </div>
+
                 <div class="erd-cards-container" id="erd-cards-container">
+
                     <div style="padding:1.5rem;text-align:center;color:var(--text-muted);font-size:.85rem;">Memuat schema ERD...</div>
+
                 </div>
+
                 <canvas id="erd-canvas" class="erd-canvas" style="display:none;"></canvas>
+
             </div>
+
+
 
         </aside>
 
+
+
         <!-- Right Panel: SQL Editor & Output Table -->
+
         <section class="work-area">
 
+
+
             <!-- Editor Actions Toolbar -->
+
             <div class="editor-toolbar">
+
                 <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+
                     <span style="font-weight: 600; font-size: 0.85rem; color: var(--text-main);">
+
                         SQL Editor
+
                     </span>
-                    <span style="font-size: 0.75rem; color: var(--text-subtle);">
-                        (PostgreSQL Sandbox - Read-Only)
-                    </span>
+
+
+
+                    <!-- pgAdmin-Style Database Selector -->
+
+                    <div class="db-selector-wrapper" id="db-selector-box" title="Pilih koneksi database aktif untuk kueri ini">
+
+                        <span class="db-selector-label">
+
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+
+                                <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+
+                                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+
+                                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+
+                            </svg>
+
+                            DB:
+
+                        </span>
+
+                        <select id="db-connection-select" class="db-selector-select" aria-label="Pilih Koneksi Database">
+
+                            <option value="pagila" selected>pagila (Master)</option>
+
+                            <option value="sandbox_pribadi">sandbox_pribadi (Easy DDL/DML)</option>
+
+                            <option value="classicmodels">classicmodels (Sales)</option>
+
+                        </select>
+
+                        <span id="db-status-pill" class="db-status-pill" title="Status Koneksi PostgreSQL">
+
+                            <span class="db-status-dot"></span>
+
+                            <span id="db-status-text">Connected</span>
+
+                        </span>
+
+                    </div>
+
+
+
                     <span id="selection-indicator" style="display: none; align-items: center; gap: 0.35rem; font-size: 0.7rem; padding: 0.15rem 0.55rem; border-radius: 12px; background: color-mix(in srgb, var(--primary) 20%, transparent); color: var(--accent); font-weight: 600; border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);">
+
                         <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block;"></span>
+
                         Seleksi Aktif (Partial)
+
                     </span>
+
                 </div>
+
                 <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+
+                    <span id="autosave-indicator" class="autosave-indicator" title="Status penyimpanan draf lokal browser">
+                        <span class="autosave-dot"></span>
+                        <span id="autosave-text">Draf tersimpan</span>
+                    </span>
                     <button type="button" class="btn btn-secondary btn-sm" id="btn-format-sql"
+
                         title="Rapikan kata kunci query (atau bagian yang diblok)">
+
                         Format SQL
+
                     </button>
+
                     <button type="button" class="btn btn-primary" id="btn-run-query"
+
                         title="Jalankan query (Ctrl+Enter). Jika ada teks yang diseleksi, hanya bagian tersebut yang dieksekusi.">
+
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display: inline-block; vertical-align: middle; margin-right: 3px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+
                         <span id="btn-run-text">Run Query</span>
+
                     </button>
+
                     <button type="button" class="btn btn-success" id="btn-submit-answer"
+
                         title="Simpan query ini sebagai jawaban resmi">
+
                         Submit Answer
+
                     </button>
+
                 </div>
+
             </div>
+
+
 
             <!-- CodeMirror Editor Pane -->
+
             <div class="editor-pane">
+
                 <textarea id="sql-editor" name="sql_editor"></textarea>
+
             </div>
+
+
 
             <!-- Output Toolbar -->
+
             <div class="output-toolbar">
+
                 <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-main);">
+
                     Hasil Eksekusi
+
                 </div>
+
                 <div class="output-meta" id="output-meta-text">
+
                     Siap dieksekusi
+
                 </div>
+
             </div>
 
+
+
+            <!-- Auto-Grader Feedback Banner (HackerRank Style) -->
+
+            <div id="autograder-banner" class="autograder-banner" style="display: none;"></div>
+
+
+
             <!-- Output Table / State Box -->
+
             <div class="output-pane" id="output-content">
+
                 <div class="state-box state-box-empty">
+
                     <p>Klik tombol <strong>Run Query</strong> atau tekan <code>Ctrl + Enter</code> untuk melihat hasil
+
                         eksekusi SQL.</p>
+
                 </div>
+
             </div>
+
+
 
         </section>
 
+
+
     </main>
 
-    <!-- Modal Internal: Konfirmasi Keluar Ujian -->
-    <div class="modal-backdrop" id="exit-confirm-modal" style="display: none;" role="dialog" aria-modal="true"
-        aria-labelledby="exit-modal-title" onclick="if(event.target===this)closeExitModal();">
-        <div class="modal-dialog" style="max-width: 440px;" onclick="event.stopPropagation();">
-            <div class="modal-header">
-                <h3 id="exit-modal-title" style="font-size: 1.05rem; color: var(--text-main); margin: 0;">Konfirmasi
-                    Keluar Ujian</h3>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-exit-cancel-x" onclick="closeExitModal()"
-                    aria-label="Tutup"
-                    style="padding: 0.2rem 0.5rem; font-size: 1.1rem; line-height: 1;">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p style="margin-bottom: 0.75rem; color: var(--text-main); font-size: 0.95rem;">
-                    Apakah Anda yakin ingin keluar dari sesi ujian praktikum?
-                </p>
-                <div
-                    style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 0.75rem; border-radius: var(--radius-sm);">
-                    <p style="font-size: 0.85rem; color: #fca5a5; margin: 0;">
-                        Pastikan seluruh jawaban telah Anda simpan dengan menekan <strong>Submit Answer</strong> sebelum
-                        keluar. Sesi ujian Anda pada perangkat ini akan diakhiri.
-                    </p>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" id="btn-exit-cancel"
-                    onclick="closeExitModal()">Batal</button>
-                <button type="button" class="btn btn-danger" id="btn-exit-proceed" onclick="confirmExitExam()">Ya,
-                    Keluar</button>
-            </div>
+
+
+    <!-- Fullscreen Enforcement Overlay -->
+
+    <div id="fullscreen-overlay" style="display: none; position: fixed; inset: 0; z-index: 99999; background: rgba(15, 23, 42, 0.97); backdrop-filter: blur(8px); align-items: center; justify-content: center; color: #fff; text-align: center; padding: 2rem;" role="dialog" aria-modal="true" aria-labelledby="fullscreen-overlay-title">
+
+        <div style="background: var(--bg-surface, #1e293b); border: 2px solid #ef4444; border-radius: 14px; padding: 2.5rem 2rem; max-width: 520px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column; align-items: center;">
+
+            <div style="font-size: 3.5rem; margin-bottom: 1rem; line-height: 1;">⚠️</div>
+
+            <h2 id="fullscreen-overlay-title" style="font-size: 1.45rem; font-weight: 700; color: #f87171; margin-bottom: 0.75rem;">Mode Layar Penuh Diperlukan</h2>
+
+            <p style="color: #cbd5e1; font-size: 0.92rem; line-height: 1.6; margin-bottom: 1.5rem;">
+
+                Ujian praktikum harus dikerjakan dalam mode <strong>Layar Penuh (Fullscreen)</strong>. Tindakan keluar dari layar penuh, split screen, atau membuka aplikasi lain dicatat oleh sistem pengawas.
+
+            </p>
+
+            <button id="btn-enter-fullscreen" type="button" class="btn btn-primary" style="padding: 0.75rem 2rem; font-size: 0.95rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+
+                </svg>
+
+                Masuk Mode Layar Penuh
+
+            </button>
+
         </div>
+
     </div>
+
+
+
+    <!-- Modal Interaktif: Pemilihan Paket Soal Ujian (Non-dismissible) -->
+
+    <div class="modal-backdrop" id="category-select-modal" style="display: none; z-index: 3400; background: rgba(15, 23, 42, 0.94); backdrop-filter: blur(8px);" role="dialog" aria-modal="true" aria-labelledby="cat-modal-title">
+
+        <div class="modal-dialog" style="max-width: min(680px, 96vw); border: 1px solid rgba(99, 102, 241, 0.4); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--bg-surface);">
+
+            <div class="modal-header" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.75rem;">
+
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+
+                    <div style="width: 38px; height: 38px; border-radius: 8px; background: rgba(99, 102, 241, 0.15); display: flex; align-items: center; justify-content: center; color: #818cf8; font-weight: 700; font-size: 1.2rem;">
+
+                        📋
+
+                    </div>
+
+                    <div>
+
+                        <h3 id="cat-modal-title" style="font-size: 1.15rem; color: var(--text-main); margin: 0; font-weight: 700;">
+
+                            Pilih Paket Soal Ujian Praktikum
+
+                        </h3>
+
+                        <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0.2rem 0 0 0;">
+
+                            Silakan pilih salah satu paket soal yang ditugaskan kepada Anda.
+
+                        </p>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+
+            <div class="modal-body" style="padding: 1.25rem 0;">
+
+                <div style="background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin-bottom: 1.25rem;">
+
+                    <p style="font-size: 0.82rem; color: #fbbf24; margin: 0; line-height: 1.45;">
+
+                        <strong>⚠️ PENTING:</strong> Paket soal yang Anda pilih akan <strong>TERKUNCI SECARA PERMANEN</strong>. Anda tidak dapat mengganti paket sendiri setelah dikonfirmasi. Pastikan Anda memilih paket sesuai arahan pengawas lab.
+
+                    </p>
+
+                </div>
+
+
+
+                <div id="category-cards-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem;">
+
+                    <!-- Dynamically populated by student.js -->
+
+                    <div style="text-align: center; color: var(--text-muted); padding: 1.5rem; grid-column: 1 / -1;">
+
+                        Memuat daftar paket soal yang tersedia...
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+
+    <!-- Modal Konfirmasi 2-Langkah: Kunci Pilihan Paket Soal -->
+
+    <div class="modal-backdrop" id="category-confirm-modal" style="display: none; z-index: 3500; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(4px);" role="dialog" aria-modal="true" aria-labelledby="cat-confirm-title">
+
+        <div class="modal-dialog" style="max-width: min(480px, 96vw); border: 1px solid rgba(239, 68, 68, 0.4); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--bg-surface);">
+
+            <div class="modal-header">
+
+                <h3 id="cat-confirm-title" style="font-size: 1.05rem; color: #f87171; margin: 0; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
+
+                    <span>🔒</span> Konfirmasi Penguncian Paket
+
+                </h3>
+
+            </div>
+
+            <div class="modal-body">
+
+                <p style="margin-bottom: 0.75rem; color: var(--text-main); font-size: 0.95rem;">
+
+                    Anda akan memilih: <strong id="confirm-package-name" style="color: #818cf8; font-size: 1.05rem;">Paket A</strong>
+
+                </p>
+
+                <div style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 0.75rem; border-radius: var(--radius-sm); margin-bottom: 0.75rem;">
+
+                    <p style="font-size: 0.82rem; color: #fca5a5; margin: 0; line-height: 1.45;">
+
+                        Apakah Anda yakin? Sistem akan langsung mengunci lembar kerja Anda pada paket ini. Anda <strong>TIDAK DAPAT MEMBATALKAN</strong> atau mengganti paket sendiri.
+
+                    </p>
+
+                </div>
+
+            </div>
+
+            <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+
+                <button type="button" class="btn btn-secondary" id="btn-cancel-select-pkg">
+
+                    Batal / Pilih Ulang
+
+                </button>
+
+                <button type="button" class="btn btn-primary" id="btn-proceed-lock-pkg" style="background: #4f46e5; border-color: #6366f1;">
+
+                    Ya, Kunci Pilihan Saya
+
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+
+    <!-- Modal Internal: Konfirmasi Keluar Ujian -->
+
+    <div class="modal-backdrop" id="exit-confirm-modal" style="display: none;" role="dialog" aria-modal="true"
+
+        aria-labelledby="exit-modal-title" onclick="if(event.target===this)closeExitModal();">
+
+        <div class="modal-dialog" style="max-width: min(450px, 96vw);" onclick="event.stopPropagation();">
+
+            <div class="modal-header">
+
+                <h3 id="exit-modal-title" style="font-size: 1.05rem; color: var(--text-main); margin: 0;">Konfirmasi
+
+                    Keluar Ujian</h3>
+
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-exit-cancel-x" onclick="closeExitModal()"
+
+                    aria-label="Tutup"
+
+                    style="padding: 0.2rem 0.5rem; font-size: 1.1rem; line-height: 1;">&times;</button>
+
+            </div>
+
+            <div class="modal-body">
+
+                <p style="margin-bottom: 0.75rem; color: var(--text-main); font-size: 0.95rem;">
+
+                    Apakah Anda yakin ingin keluar dari sesi ujian praktikum?
+
+                </p>
+
+                <div
+
+                    style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 0.75rem; border-radius: var(--radius-sm);">
+
+                    <p style="font-size: 0.85rem; color: #fca5a5; margin: 0;">
+
+                        Pastikan seluruh jawaban telah Anda simpan dengan menekan <strong>Submit Answer</strong> sebelum
+
+                        keluar. Sesi ujian Anda pada perangkat ini akan diakhiri.
+
+                    </p>
+
+                </div>
+
+            </div>
+
+            <div class="modal-footer">
+
+                <button type="button" class="btn btn-secondary" id="btn-exit-cancel"
+
+                    onclick="closeExitModal()">Batal</button>
+
+                <button type="button" class="btn btn-danger" id="btn-exit-proceed" onclick="confirmExitExam()">Ya,
+
+                    Keluar</button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
 
     <!-- ERD Diagram Modal -->
+
     <div id="erd-diagram-modal" style="display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.85);backdrop-filter:blur(4px);flex-direction:column;" role="dialog" aria-modal="true" aria-label="Diagram ERD Database">
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:.65rem 1.25rem;background:var(--bg-surface);border-bottom:1px solid var(--border-subtle);flex-shrink:0;">
+
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:.65rem 1.25rem;background:var(--bg-surface);border-bottom:1px solid var(--border-subtle);flex-shrink:0;flex-wrap:wrap;gap:0.5rem;">
+
             <div style="display:flex;align-items:center;gap:.75rem;">
+
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="18" y="3" width="4" height="4" rx="1"/><rect x="6" y="17" width="4" height="4" rx="1"/><rect x="14" y="17" width="4" height="4" rx="1"/><line x1="4" y1="7" x2="4" y2="14"/><line x1="12" y1="7" x2="12" y2="14"/><line x1="20" y1="7" x2="20" y2="14"/><line x1="4" y1="14" x2="20" y2="14"/><line x1="8" y1="17" x2="8" y2="14"/><line x1="16" y1="17" x2="16" y2="14"/></svg>
+
                 <span style="font-weight:700;font-size:.95rem;color:var(--text-main);">Diagram Relasi ERD — classicmodels</span>
+
                 <span style="font-size:.75rem;color:var(--text-subtle);margin-left:0.5rem;">Susunan Terstruktur &amp; Bebas Tumpang Tindih</span>
+
             </div>
+
             <div style="display:flex;gap:.5rem;align-items:center;">
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="erdResetLayout()" title="Kembalikan susunan diagram ke posisi teratur default" style="display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .65rem;font-size:.8rem;">
+
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+
                     Rapikan Posisi
+
                 </button>
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="erdResetView()" title="Pusatkan tampilan" style="padding:.3rem .65rem;font-size:.8rem;">Pusatkan</button>
+
                 <div style="display:inline-flex;align-items:center;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);overflow:hidden;">
+
                     <button type="button" class="btn btn-secondary btn-sm" onclick="erdZoomOut()" title="Zoom out" style="padding:.25rem .55rem;border:none;border-radius:0;font-size:1rem;line-height:1;">&#8722;</button>
+
                     <button type="button" class="btn btn-secondary btn-sm" onclick="erdZoomIn()" title="Zoom in" style="padding:.25rem .55rem;border:none;border-radius:0;font-size:1rem;line-height:1;">&#43;</button>
+
                 </div>
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="closeErdDiagram()" aria-label="Tutup" style="padding:.25rem .65rem;font-size:1.2rem;line-height:1;margin-left:.25rem;">&times;</button>
+
             </div>
+
         </div>
+
         <!-- Legend & Instructions -->
+
         <div style="display:flex;justify-content:space-between;align-items:center;padding:.4rem 1.25rem;background:var(--bg-surface);border-bottom:1px solid var(--border-subtle);flex-shrink:0;font-size:.72rem;color:var(--text-muted);flex-wrap:wrap;gap:.75rem;">
+
             <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;">
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#6366f1;"></span>Organisasi</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#059669;"></span>Pelanggan &amp; Bayar</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#0284c7;"></span>Katalog Produk</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#d97706;"></span>Pesanan &amp; Detail</span>
+
                 <span style="display:inline-block;width:1px;height:14px;background:var(--border-subtle);margin:0 .25rem;"></span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;padding:1px 4px;border-radius:2px;background:rgba(245,158,11,0.2);color:#f59e0b;font-weight:700;font-size:.65rem;">PK</span> Primary Key</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;padding:1px 4px;border-radius:2px;background:rgba(99,102,241,0.2);color:#6366f1;font-weight:700;font-size:.65rem;">FK</span> Foreign Key</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:28px;height:2px;background:#6366f1;position:relative;"></span>FK ●───► PK</span>
+
             </div>
+
             <div style="color:var(--text-subtle);">
+
                 💡 Drag kartu: Geser posisi &bull; Drag kanvas: Pan &bull; Scroll: Zoom &bull; Klik tabel: Sorot relasi
+
             </div>
+
         </div>
+
         <div style="flex:1;overflow:hidden;position:relative;" id="erd-canvas-wrapper">
+
             <canvas id="erd-diagram-canvas" style="display:block;width:100%;height:100%;"></canvas>
+
         </div>
+
     </div>
 
+
+
     <!-- Script Inline Controller Modal (Menjamin Berfungsi di Safari Tanpa Terkendala Cache) -->
+
     <script>
+
         function openExitModal() {
+
             var m = document.getElementById("exit-confirm-modal");
+
             if (m) {
+
                 m.style.display = "flex";
+
             }
+
         }
+
         function closeExitModal() {
+
             var m = document.getElementById("exit-confirm-modal");
+
             if (m) {
+
                 m.style.display = "none";
+
             }
+
         }
+
         function confirmExitExam() {
+
             window.isLoggingOut = true;
+
             window.location.href = "/logout";
+
         }
+
         document.addEventListener("keydown", function (e) {
+
             if (e.key === "Escape") {
+
                 closeExitModal();
+
                 if (typeof closeErdDiagram === "function") closeErdDiagram();
+
             }
+
         });
+
     </script>
 
+
+
     <!-- 100% Offline JavaScript Modules -->
+
     <script src="/static/vendor/codemirror/lib/codemirror.js"></script>
+
     <script src="/static/vendor/codemirror/mode/sql/sql.js"></script>
+
     <script src="/static/vendor/codemirror/addon/hint/show-hint.js"></script>
+
     <script src="/static/vendor/codemirror/addon/hint/sql-hint.js"></script>
-    <script src="/static/js/student.js?v=3"></script>
+
+    <script src="/static/js/student.js?v=20261101_v8"></script>
+
+
+
+    <!-- Image Lightbox Modal for Expected Output Table Screenshot (Fase 4) -->
+
+    <div id="image-lightbox-modal" class="image-lightbox-modal" style="display: none;" role="dialog" aria-modal="true" aria-label="Perbesar Ekspektasi Output">
+
+        <div class="image-lightbox-overlay" id="image-lightbox-overlay"></div>
+
+        <div class="image-lightbox-content">
+
+            <div class="image-lightbox-header">
+
+                <span class="image-lightbox-title">
+
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+
+                    Ekspektasi Output Tabel Acuan Dosen
+
+                </span>
+
+                <button type="button" class="image-lightbox-close" id="btn-close-lightbox" title="Tutup (Esc)">✕</button>
+
+            </div>
+
+            <div class="image-lightbox-body">
+
+                <img id="image-lightbox-img" class="image-lightbox-img" src="" alt="Ukuran Penuh Ekspektasi Output Tabel" />
+
+            </div>
+
+        </div>
+
+    </div>
+
+
 
 </body>
+
+
 
 </html>
