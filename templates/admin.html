@@ -1,633 +1,1279 @@
 <!DOCTYPE html>
+
 <html lang="id" data-theme="dracula">
 
+
+
 <head>
+
     <meta charset="UTF-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>Dashboard Pengawas & Dosen - Offline SQL Exam</title>
+
     <!-- Apply saved theme before CSS renders -->
+
     <script>(function () { var t = localStorage.getItem("exam_global_theme") || "dracula"; document.documentElement.setAttribute("data-theme", t); })();</script>
-    <link rel="stylesheet" href="/static/css/style.css">
+
+    <link rel="stylesheet" href="/static/css/style.css?v=20261101_v5">
+
 </head>
+
+
 
 <body>
 
+
+
     <!-- Header Navigation -->
+
     <header class="app-header">
+
         <div class="brand-wrapper">
+
             <span class="brand-logo-badge" style="background-color: var(--primary);">ADMIN</span>
+
             <div class="brand-title">Dashboard Pengawas Ujian</div>
+
         </div>
 
+
+
         <div class="header-meta">
+
             <div class="user-tag" title="Alamat IP Server Host" style="gap:.4rem;">
+
                 <span style="font-size:.72rem;color:var(--text-muted);font-weight:600;">HOST</span>
+
                 <span style="font-family:var(--font-mono);font-size:.82rem;">{{ host_ip }}</span>
+
             </div>
+
             <!-- Global Theme Switcher -->
+
             <div class="global-theme-switcher" title="Ganti tema tampilan">
+
                 <span class="global-theme-icon">Theme</span>
+
                 <select id="global-theme-select" class="global-theme-select" aria-label="Pilih Tema">
+
                     <option value="dracula">Dracula</option>
+
                     <option value="monokai">Monokai</option>
+
                     <option value="nord">Nord</option>
+
                     <option value="material">Material Darker</option>
+
                     <option value="gruvbox">Gruvbox Dark</option>
+
                     <option value="solarized">Solarized Dark</option>
+
                     <option value="ayu">Ayu Dark</option>
+
                     <option value="light">Light Mode</option>
+
                 </select>
+
             </div>
+
             <button type="button" class="btn btn-secondary btn-sm" id="btn-open-change-pw-modal"
+
                 title="Ubah Password Master Admin/Pengawas">
+
                 Ganti Password
+
             </button>
+
             <a href="/admin/logout" class="btn btn-secondary btn-sm">Logout</a>
+
         </div>
+
     </header>
+
+
 
     <div class="admin-container">
 
+
+
         <!-- Stat Cards Row -->
+
         <div class="stat-grid">
+
             <div class="stat-card">
+
                 <div class="stat-card-title">Total Mahasiswa Terdaftar</div>
+
                 <div class="stat-card-value" id="stat-total-students">0</div>
+
             </div>
+
             <div class="stat-card">
+
                 <div class="stat-card-title">Mahasiswa Aktif (Online)</div>
+
                 <div class="stat-card-value" style="color: #10b981;" id="stat-online-students">0</div>
+
             </div>
+
             <div class="stat-card">
+
                 <div class="stat-card-title">Total Submisi Jawaban</div>
+
                 <div class="stat-card-value" style="color: #60a5fa;" id="stat-total-submissions">0</div>
+
             </div>
+
             <div class="stat-card">
+
                 <div class="stat-card-title">Peringatan Berpindah Tab</div>
+
                 <div class="stat-card-value" style="color: #f59e0b;" id="stat-suspicious-count">0</div>
+
             </div>
+
         </div>
 
+
+
         <!-- Navigation Tabs -->
+
         <nav class="admin-tabs" role="tablist">
+
             <button type="button" class="admin-tab-btn active" data-tab="monitoring" role="tab" aria-selected="true">
+
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+
                 Monitoring
+
             </button>
+
             <button type="button" class="admin-tab-btn" data-tab="questions" role="tab" aria-selected="false">
+
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+
                 Soal Ujian
+
             </button>
+
             <button type="button" class="admin-tab-btn" data-tab="database" role="tab" aria-selected="false">
+
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+
                 Database
+
             </button>
+
             <button type="button" class="admin-tab-btn" data-tab="logs" role="tab">
+
                 4. Log Aktivitas & Kecurangan
+
             </button>
+
             <button type="button" class="admin-tab-btn" data-tab="export" role="tab" aria-selected="false">
+
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+
                 Export Hasil
+
             </button>
+
         </nav>
 
+
+
         <!-- Tab 1: Live Monitoring -->
+
         <section id="tab-monitoring" class="tab-pane">
 
+
+
             <div class="monitoring-top-grid">
+
                 <!-- Exam Control Card -->
+
                 <div class="admin-card" style="border-color: var(--border-strong); display: flex; flex-direction: column; justify-content: space-between;">
+
                     <div>
+
                         <div class="admin-card-header" style="margin-bottom: 0.75rem;">
+
                             <div>
+
                                 <h2 style="font-size: 1.05rem;">Kontrol Ujian</h2>
+
                                 <p style="font-size: 0.83rem;">Buka atau tutup akses lembar soal untuk seluruh peserta.</p>
+
                             </div>
+
                             <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+
                                 <div style="display: flex; align-items: center; gap: 0.4rem;">
+
                                     <span style="font-size: 0.78rem; color: var(--text-muted);">Status:</span>
+
                                     <span id="admin-exam-state-badge" class="status-badge badge-warning">Menunggu</span>
+
                                 </div>
+
                                 <button type="button" class="btn btn-success btn-sm" id="btn-exam-start"
+
                                     title="Buka lembar soal untuk semua peserta di waiting room">
+
                                     Mulai Ujian
+
                                 </button>
+
                                 <button type="button" class="btn btn-danger btn-sm" id="btn-exam-stop"
+
                                     title="Tutup akses soal. Peserta kembali ke waiting room." disabled>
+
                                     Hentikan Ujian
+
                                 </button>
+
                             </div>
+
                         </div>
+
                         <div style="display: flex; gap: 1.25rem; padding-top: 0.75rem; border-top: 1px solid var(--border-subtle); align-items: flex-start;">
+
                             <div style="flex-shrink: 0;">
+
                                 <div style="font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.2rem;">Di Waiting Room</div>
+
                                 <div style="font-size: 1.6rem; font-weight: 700; color: var(--text-main);" id="admin-waiting-count">0</div>
+
                             </div>
+
                             <div style="flex: 1; min-width: 0;">
+
                                 <div style="font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.35rem;">Peserta Terhubung</div>
+
                                 <div id="admin-waiting-names" style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; max-height: 120px; overflow-y: auto;"></div>
+
                             </div>
+
                         </div>
+
                     </div>
+
                 </div>
+
+
 
                 <!-- Live Chat Waiting Room (YouTube Live Stream style) -->
+
                 <div class="admin-card admin-live-chat-card" style="border-color: var(--border-strong);">
+
                     <div class="admin-card-header" style="margin-bottom: 0.5rem; padding-bottom: 0.5rem;">
+
                         <div style="display: flex; align-items: center; gap: 0.5rem;">
+
                             <span class="live-status-dot" title="Live stream aktif"></span>
+
                             <div>
+
                                 <h2 style="font-size: 0.95rem; margin: 0; display: flex; align-items: center; gap: 0.4rem;">
+
                                     Live Chat Waiting Room
+
                                 </h2>
+
                                 <p style="font-size: 0.75rem; margin: 0; color: var(--text-muted);">
+
                                     Stream real-time • Maks. 50 pesan
+
                                 </p>
+
                             </div>
+
                         </div>
+
                         <div style="display: flex; align-items: center; gap: 0.4rem;">
+
                             <span id="admin-chat-count-badge" style="font-size: 0.7rem; padding: 0.15rem 0.5rem; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-muted);">0 pesan</span>
+
                             <button type="button" class="btn btn-secondary btn-sm" id="btn-admin-clear-chat" title="Bersihkan riwayat pesan chat" style="height: 28px; padding: 0 0.5rem; font-size: 0.72rem;">
+
                                 Bersihkan
+
                             </button>
+
                         </div>
+
                     </div>
+
+
 
                     <!-- Chat Message Feed -->
+
                     <div class="admin-chat-stream-wrapper">
+
                         <div class="admin-chat-stream" id="admin-chat-messages" tabindex="0" aria-label="Live chat messages">
+
                             <div class="admin-chat-empty" id="admin-chat-empty">Belum ada obrolan di waiting room...</div>
+
                         </div>
+
                         <button type="button" class="admin-chat-scroll-bottom" id="admin-chat-scroll-bottom" style="display: none;" title="Scroll ke pesan terbaru">
+
                             ↓ Pesan Baru
+
                         </button>
+
                     </div>
+
+
 
                     <!-- Proctor Announcement / Send Form -->
+
                     <form id="admin-chat-form" class="admin-chat-form" autocomplete="off" style="margin-top: 0.5rem; display: flex; gap: 0.4rem;">
+
                         <input type="text" id="admin-chat-input" class="form-input" placeholder="Kirim pesan / pengumuman ke peserta..." maxlength="300" autocomplete="off" style="height: 34px; font-size: 0.8rem; padding: 0.4rem 0.65rem;">
+
                         <button type="submit" class="btn btn-primary btn-sm" id="btn-admin-chat-send" style="height: 34px; padding: 0 0.75rem; font-size: 0.78rem; flex-shrink: 0;">
+
                             Kirim
+
                         </button>
+
                     </form>
+
                 </div>
+
             </div>
+
+
 
             <div class="admin-card">
+
                 <div class="admin-card-header">
+
                     <div>
+
                         <h2 style="font-size: 1.15rem;">Aktivitas Mahasiswa Real-Time</h2>
+
                         <p style="font-size: 0.85rem;">Daftar mahasiswa yang terhubung ke jaringan ujian lokal (Refresh
+
                             otomatis tiap 6 detik).</p>
+
                     </div>
+
                     <div style="display: flex; gap: 0.5rem;">
+
                         <button type="button" class="btn btn-danger btn-sm" id="btn-stop-all-sessions"
+
                             title="Paksa logout semua mahasiswa yang sedang aktif">
+
                             Hentikan Semua Sesi
+
                         </button>
+
                         <button type="button" class="btn btn-warning btn-sm" id="btn-clear-sessions"
+
                             title="Hapus semua data sesi & submisi mahasiswa untuk ujian baru">
+
                             Bersihkan Sesi
+
                         </button>
+
                         <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-monitor">
+
                             Refresh Sekarang
+
                         </button>
+
                     </div>
+
                 </div>
 
+
+
                 <div style="overflow-x: auto;">
+
                     <table class="admin-table">
+
                         <thead>
+
                             <tr>
+
                                 <th>NIM</th>
+
                                 <th>Nama Mahasiswa</th>
+
                                 <th>IP Address</th>
+
+                                <th>Paket Soal</th>
+
                                 <th>Status</th>
+
                                 <th>Jawaban Disubmit</th>
+
+                                <th>Total Skor</th>
+
                                 <th>Peringatan Tab</th>
+
                                 <th style="text-align: right;">Aksi</th>
+
                             </tr>
+
                         </thead>
+
                         <tbody id="student-table-body">
+
                             <tr>
-                                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+
+                                <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+
                                     Memuat data mahasiswa...
+
                                 </td>
+
                             </tr>
+
                         </tbody>
+
                     </table>
+
                 </div>
+
             </div>
+
         </section>
+
+
 
         <!-- Tab 2: Question Management -->
+
         <section id="tab-questions" class="tab-pane" style="display: none;">
+
             <div class="admin-card">
+
                 <div class="admin-card-header">
+
                     <div>
+
                         <h2 style="font-size: 1.15rem;">Bank Soal Ujian Praktikum</h2>
-                        <p style="font-size: 0.85rem;">Kelola pertanyaan, bobot poin, dan query kunci jawaban yang
-                            diujikan.</p>
+
+                        <p style="font-size: 0.85rem;">Kelola pertanyaan, kategori/paket soal, bobot poin, dan query kunci jawaban.</p>
+
                     </div>
-                    <div style="display: flex; gap: 0.5rem;">
+
+                    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+
+                        <select id="filter-question-category" class="form-input" style="max-width: 180px; padding: 0.35rem 0.65rem; font-size: 0.85rem; font-weight: 600; cursor: pointer;">
+
+                            <option value="">Semua Paket</option>
+
+                        </select>
+
+                        <button type="button" class="btn btn-secondary btn-sm" id="btn-add-package" style="border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8; display: inline-flex; align-items: center; gap: 0.35rem;" title="Tambah paket soal ujian baru">
+
+                            + Tambah Paket Baru
+
+                        </button>
+
                         <button type="button" class="btn btn-danger btn-sm" id="btn-delete-all-questions"
+
                             title="Hapus seluruh soal dari bank soal ujian">
+
                             Hapus Semua Soal
+
                         </button>
+
                         <button type="button" class="btn btn-primary btn-sm" id="btn-add-question">
+
                             + Tambah Soal Baru
+
                         </button>
+
                     </div>
+
                 </div>
 
-                <div style="overflow-x: auto;">
-                    <table class="admin-table">
-                        <thead>
-                            <tr>
-                                <th>No.</th>
-                                <th>Judul Soal</th>
-                                <th>Bobot</th>
-                                <th>Kunci Jawaban (Acuan)</th>
-                                <th style="text-align: right;">Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody id="questions-table-body">
-                            <!-- Populated dynamically by admin.js -->
-                        </tbody>
-                    </table>
+
+
+                <!-- Package Summary Cards Grid -->
+
+                <div id="package-summary-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.85rem; margin-bottom: 1.5rem;">
+
+                    <!-- Populated dynamically by admin.js -->
+
                 </div>
+
+
+
+                <div style="overflow-x: auto;">
+
+                    <table class="admin-table" style="min-width: 860px;">
+
+                        <thead>
+
+                            <tr>
+
+                                <th style="width: 100px; white-space: nowrap;">Paket</th>
+
+                                <th style="width: 70px; white-space: nowrap;">No.</th>
+
+                                <th style="min-width: 220px;">Judul Soal</th>
+
+                                <th style="width: 100px; white-space: nowrap;">Bobot</th>
+
+                                <th style="min-width: 260px;">Kunci Jawaban (Acuan)</th>
+
+                                <th style="text-align: right; width: 140px; white-space: nowrap;">Aksi</th>
+
+                            </tr>
+
+                        </thead>
+
+                        <tbody id="questions-table-body">
+
+                            <!-- Populated dynamically by admin.js -->
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
             </div>
+
         </section>
+
+
 
         <!-- Tab 3: Database Sandbox -->
+
         <section id="tab-database" class="tab-pane" style="display: none;">
+
             <div class="admin-card">
-                <div class="admin-card-header">
+
+                <div class="admin-card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem;">
+
                     <div>
-                        <h2 style="font-size: 1.15rem;">Manajemen PostgreSQL Sandbox</h2>
-                        <p style="font-size: 0.85rem;">Penyedia data master <code>classicmodels</code> dan eksekusi
-                            query mahasiswa.</p>
+
+                        <h2 style="font-size: 1.15rem;">Manajemen PostgreSQL Multi-Database</h2>
+
+                        <p style="font-size: 0.85rem;">Inspeksi skema master (<code>pagila</code>, <code>classicmodels</code>), reset dataset, dan unggah file SQL baru.</p>
+
                     </div>
-                    <div>
+
+                    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+
+                        <label for="admin-db-selector" style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Pilih Database:</label>
+
+                        <select id="admin-db-selector" class="form-input" style="max-width: 250px; padding: 0.35rem 0.65rem; font-size: 0.85rem; font-weight: 600; cursor: pointer;">
+
+                            <option value="pagila" selected>pagila (Master Ujian 2026)</option>
+
+                            <option value="classicmodels">classicmodels (Sales & Retail)</option>
+
+                        </select>
+
                         <button type="button" class="btn btn-danger btn-sm" id="btn-reset-db">
-                            Reset Database Sandbox
+
+                            Reset Database Terpilih
+
                         </button>
+
                     </div>
+
                 </div>
+
+
 
                 <div
+
                     style="margin-bottom: 1.5rem; background: #0f172a; padding: 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
-                    <h3 style="font-size: 0.95rem; margin-bottom: 0.5rem;">Upload File SQL Baru (Inisialisasi / Reset
-                        Custom)</h3>
-                    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">Unggah file <code>.sql</code> untuk membuat
-                        schema dan data ujian baru di PostgreSQL:</p>
-                    <form id="sql-upload-form" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+
+                    <h3 style="font-size: 0.95rem; margin-bottom: 0.5rem;">Upload File SQL Baru (Inisialisasi / Reset Custom)</h3>
+
+                    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">Unggah file <code>.sql</code> untuk membuat schema dan data ujian baru di PostgreSQL:</p>
+
+                    <form id="sql-upload-form" style="display: flex; gap: 0.65rem; flex-wrap: wrap; align-items: center;">
+
+                        <label for="sql-upload-target-db" style="font-size: 0.85rem; color: var(--text-muted); font-weight: 600;">Target Database:</label>
+
+                        <select id="sql-upload-target-db" class="form-input" style="max-width: 210px; padding: 0.35rem 0.65rem; font-size: 0.85rem; font-weight: 600; cursor: pointer;">
+
+                            <option value="pagila" selected>pagila (Master Ujian 2026)</option>
+
+                            <option value="classicmodels">classicmodels (Sales & Retail)</option>
+
+                        </select>
+
                         <input type="file" id="sql-file-input" accept=".sql" class="form-input"
-                            style="max-width: 350px;">
+
+                            style="max-width: 320px;">
+
                         <button type="submit" class="btn btn-secondary" id="btn-upload-sql">Upload & Eksekusi</button>
+
                     </form>
+
                 </div>
+
+
 
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
-                    <h3 style="font-size: 1rem; margin: 0;">Preview Skema Tabel 'classicmodels':</h3>
+
+                    <h3 style="font-size: 1rem; margin: 0;" id="admin-schema-preview-title">Preview Skema Tabel 'pagila':</h3>
+
                     <button type="button" class="btn btn-primary btn-sm" id="btn-admin-open-erd" onclick="openErdDiagram()" style="display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.75rem;">
+
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="18" y="3" width="4" height="4" rx="1"/><rect x="6" y="17" width="4" height="4" rx="1"/><rect x="14" y="17" width="4" height="4" rx="1"/><line x1="4" y1="7" x2="4" y2="14"/><line x1="12" y1="7" x2="12" y2="14"/><line x1="20" y1="7" x2="20" y2="14"/><line x1="4" y1="14" x2="20" y2="14"/><line x1="8" y1="17" x2="8" y2="14"/><line x1="16" y1="17" x2="16" y2="14"/></svg>
+
                         Buka Diagram ERD Visual
+
                     </button>
+
                 </div>
+
                 <div id="db-schema-preview">
+
                     <p style="color: var(--text-muted);">Memuat struktur database...</p>
+
                 </div>
+
             </div>
+
         </section>
+
+
 
         <!-- Tab 4: Logs -->
+
         <section id="tab-logs" class="tab-pane" style="display: none;">
+
             <div class="admin-card">
+
                 <div class="admin-card-header">
+
                     <div>
+
                         <h2 style="font-size: 1.15rem;">Log Aktivitas Sistem & Kejujuran</h2>
+
                         <p style="font-size: 0.85rem;">Catatan kronologis login, submit, serta deteksi perpindahan
+
                             jendela/tab.</p>
+
                     </div>
+
                     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+
                         <a href="/api/admin/export/logs-csv" class="btn btn-primary btn-sm" id="btn-download-logs-tab4"
+
                             download="rekap_log_aktivitas.csv"
+
                             title="Download seluruh riwayat log aktivitas dalam format CSV">
+
                             Download Rekap Log (CSV)
+
                         </a>
+
                         <a href="/api/admin/export/tab-switches-csv" class="btn btn-warning btn-sm"
+
                             id="btn-download-tab-switches-tab4" download="rekap_perpindahan_tab.csv"
+
                             title="Download rekap riwayat dan frekuensi perpindahan tab mahasiswa dalam format CSV">
+
                             Download Rekap Perpindahan Tab (CSV)
+
                         </a>
+
                         <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-logs">
+
                             Refresh Log
+
                         </button>
+
                         <button type="button" class="btn btn-danger btn-sm" id="btn-clear-logs"
+
                             title="Hapus seluruh riwayat log aktivitas ujian">
+
                             Bersihkan Semua Log
+
                         </button>
+
                     </div>
+
                 </div>
+
+
 
                 <div style="overflow-x: auto;">
+
                     <table class="admin-table">
+
                         <thead>
+
                             <tr>
+
                                 <th>Waktu</th>
+
                                 <th>NIM</th>
+
                                 <th>Nama</th>
+
                                 <th>Aksi</th>
+
                                 <th>Detail Aktivitas</th>
+
                             </tr>
+
                         </thead>
+
                         <tbody id="logs-table-body">
+
                             <!-- Populated dynamically by admin.js -->
+
                         </tbody>
+
                     </table>
+
                 </div>
+
             </div>
+
         </section>
 
+
+
         <!-- Tab 5: Export -->
+
         <section id="tab-export" class="tab-pane" style="display: none;">
+
             <div class="admin-card">
+
                 <div class="admin-card-header">
+
                     <div>
+
                         <h2 style="font-size: 1.15rem;">Export Hasil & Rekap Ujian</h2>
+
                         <p style="font-size: 0.85rem;">Unduh lembar jawaban mahasiswa untuk penilaian offline.</p>
+
                     </div>
+
                 </div>
+
+
 
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem;">
 
+
+
                     <div
+
                         style="background: #0f172a; border: 1px solid var(--border-subtle); padding: 1.25rem; border-radius: var(--radius-md);">
+
                         <h3 style="font-size: 1rem; margin-bottom: 0.4rem;">Export Format CSV / Spreadsheet</h3>
+
                         <p style="font-size: 0.85rem; margin-bottom: 1rem;">
+
                             Berisi tabel seluruh jawaban mahasiswa (NIM, Nama, Nomor Soal, Bobot, Query Jawaban, Waktu
+
                             Submit) yang siap dibuka di Microsoft Excel atau LibreOffice Calc.
+
                         </p>
+
                         <a href="/api/admin/export/csv" class="btn btn-primary" id="btn-export-csv"
+
                             download="hasil_ujian_praktikum.csv" style="width: 100%; text-align: center;">
+
                             Download CSV Hasil Ujian
+
                         </a>
+
                     </div>
 
+
+
                     <div
+
                         style="background: #0f172a; border: 1px solid var(--border-subtle); padding: 1.25rem; border-radius: var(--radius-md);">
+
                         <h3 style="font-size: 1rem; margin-bottom: 0.4rem;">Export Format ZIP (.sql Per Mahasiswa)</h3>
+
                         <p style="font-size: 0.85rem; margin-bottom: 1rem;">
+
                             Menghasilkan berkas arsip ZIP yang berisi satu file SQL per mahasiswa (contoh:
+
                             <code>H071231052_Yusra_Erlangga_Putra.sql</code>) yang memuat seluruh jawaban yang telah
+
                             diformat
+
                             rapi.
+
                         </p>
+
                         <a href="/api/admin/export/zip" class="btn btn-success" id="btn-export-zip"
+
                             download="jawaban_sql_mahasiswa.zip" style="width: 100%; text-align: center;">
+
                             Download ZIP Berkas .SQL
+
                         </a>
+
                     </div>
 
+
+
                     <div
+
                         style="background: #0f172a; border: 1px solid var(--border-subtle); padding: 1.25rem; border-radius: var(--radius-md);">
+
                         <h3 style="font-size: 1rem; margin-bottom: 0.4rem;">Rekap Log Aktivitas Sistem (CSV)</h3>
+
                         <p style="font-size: 0.85rem; margin-bottom: 1rem;">
+
                             Berisi seluruh rekaman kronologis aktivitas sistem ujian (login, logout, submit jawaban,
+
                             eksekusi query, reset sesi, pembaruan master key, dll) untuk keperluan audit pengawasan
+
                             lengkap.
+
                         </p>
+
                         <a href="/api/admin/export/logs-csv" class="btn btn-primary" id="btn-export-logs-csv"
+
                             download="rekap_log_aktivitas.csv" style="width: 100%; text-align: center;">
+
                             Download Rekap Log (CSV)
+
                         </a>
+
                     </div>
 
+
+
                     <div
+
                         style="background: #0f172a; border: 1px solid var(--border-subtle); padding: 1.25rem; border-radius: var(--radius-md);">
+
                         <h3 style="font-size: 1rem; margin-bottom: 0.4rem;">Rekap Perpindahan Tab & Kejujuran (CSV)</h3>
+
                         <p style="font-size: 0.85rem; margin-bottom: 1rem;">
+
                             Berisi rekapitulasi data mahasiswa yang berpindah tab atau kehilangan fokus jendela ujian,
+
                             lengkap dengan frekuensi pelanggaran dan waktu kejadian masing-masing.
+
                         </p>
+
                         <a href="/api/admin/export/tab-switches-csv" class="btn btn-warning"
+
                             id="btn-export-tab-switches-csv" download="rekap_perpindahan_tab.csv"
+
                             style="width: 100%; text-align: center;">
+
                             Download Rekap Perpindahan Tab (CSV)
+
                         </a>
+
                     </div>
+
+
 
                 </div>
+
             </div>
+
         </section>
 
+
+
     </div>
+
+
 
     <!-- Modal: Clear Previous Sessions -->
+
     <div class="modal-backdrop" id="clear-sessions-modal" style="display: none;" role="dialog" aria-modal="true">
-        <div class="modal-dialog" style="max-width: 480px;">
+
+        <div class="modal-dialog" style="max-width: min(520px, 96vw);">
+
             <div class="modal-header">
+
                 <h3>Bersihkan Sesi Ujian Sebelumnya</h3>
+
                 <button type="button" class="btn btn-secondary btn-sm"
+
                     onclick="document.getElementById('clear-sessions-modal').style.display='none'">&times;</button>
+
             </div>
+
             <div class="modal-body">
+
                 <p style="margin-bottom: 1rem; color: #f1f5f9;">Tindakan ini akan <strong>menghapus seluruh data
+
                         mahasiswa, submisi jawaban, dan sesi</strong> yang tersimpan agar sistem siap digunakan untuk
+
                     ujian baru.</p>
+
                 <div
+
                     style="background: #1e293b; border: 1px solid #ef4444; border-radius: var(--radius-sm); padding: 1rem; margin-bottom: 1rem;">
+
                     <p style="color: #fca5a5; font-size: 0.9rem; margin: 0;"><strong>Peringatan:</strong> Data yang
+
                         dihapus tidak dapat dikembalikan. Pastikan sudah mengunduh export jawaban sebelum melanjutkan.
+
                     </p>
+
                 </div>
+
                 <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem;">
+
                     <input type="checkbox" id="chk-clear-logs-also" style="width: 16px; height: 16px;">
+
                     <span>Hapus juga seluruh riwayat log aktivitas</span>
+
                 </label>
+
             </div>
+
             <div class="modal-footer">
+
                 <button type="button" class="btn btn-secondary"
+
                     onclick="document.getElementById('clear-sessions-modal').style.display='none'">Batal</button>
+
                 <button type="button" class="btn btn-danger" id="btn-confirm-clear-sessions">Ya, Bersihkan
+
                     Sekarang</button>
+
             </div>
+
         </div>
+
     </div>
 
+
+
     <!-- Modal: Konfirmasi Hapus Semua Soal -->
+
     <div class="modal-backdrop" id="delete-all-questions-modal" style="display: none;" role="dialog" aria-modal="true"
+
         aria-labelledby="delete-all-q-title">
+
         <div class="modal-dialog" style="max-width: 460px;">
+
             <div class="modal-header">
+
                 <h3 id="delete-all-q-title" style="color: #ef4444;">Hapus Seluruh Bank Soal</h3>
+
                 <button type="button" class="btn btn-secondary btn-sm"
+
                     onclick="document.getElementById('delete-all-questions-modal').style.display='none'">&times;</button>
+
             </div>
+
             <div class="modal-body">
+
                 <p style="margin-bottom: 0.75rem; color: #f1f5f9;">
+
                     Tindakan ini akan <strong>menghapus seluruh soal ujian</strong> dari bank soal secara permanen.
+
                 </p>
+
                 <div
+
                     style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 0.75rem; border-radius: var(--radius-sm); margin-bottom: 0.75rem;">
+
                     <p style="font-size: 0.85rem; color: #fca5a5; margin: 0;">
+
                         <strong>Peringatan:</strong> Data soal yang dihapus tidak dapat dipulihkan.
+
                         Submisi jawaban mahasiswa yang terkait juga akan terpengaruh.
+
                     </p>
+
                 </div>
+
                 <p style="font-size: 0.85rem; color: var(--text-muted);">Ketik <code>HAPUS SEMUA</code> untuk
+
                     mengkonfirmasi:</p>
+
                 <input type="text" id="delete-all-confirm-input" class="form-input" placeholder="HAPUS SEMUA"
+
                     autocomplete="off" style="margin-top: 0.5rem;">
+
             </div>
+
             <div class="modal-footer">
+
                 <button type="button" class="btn btn-secondary"
+
                     onclick="document.getElementById('delete-all-questions-modal').style.display='none'">Batal</button>
+
                 <button type="button" class="btn btn-danger" id="btn-confirm-delete-all-questions" disabled>Ya, Hapus
+
                     Semua</button>
+
             </div>
+
         </div>
+
+    </div>
+
+
+
+    <!-- Modal Form: Add / Edit Exam Package -->
+    <div class="modal-backdrop" id="package-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="package-modal-title">
+        <form class="modal-dialog" id="form-package" onsubmit="savePackageForm(event)" style="max-width: min(520px, 96vw); max-height: min(88vh, calc(100vh - 3rem)); display: flex; flex-direction: column; overflow: hidden; margin: auto; background-color: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);">
+            <div class="modal-header" style="flex-shrink: 0; padding: 0.95rem 1.25rem; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; background-color: var(--bg-surface);">
+                <h3 id="package-modal-title">Tambah Paket Soal Baru</h3>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="closePackageModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 1.25rem; overscroll-behavior: contain;">
+                <div class="form-group" style="margin-bottom: 0.85rem;">
+                    <label for="modal-pkg-code" class="form-label">Kode Paket (Singkat, Huruf/Angka)</label>
+                    <input type="text" id="modal-pkg-code" class="form-input" placeholder="Contoh: E, REMEDIAL, SUSULAN" maxlength="20" required style="text-transform: uppercase;">
+                    <small style="color: var(--text-muted); font-size: 0.75rem;">Maksimal 20 karakter alfanumerik. Kode ini menjadi identifikasi unik paket.</small>
+                </div>
+                <div class="form-group" style="margin-bottom: 0.85rem;">
+                    <label for="modal-pkg-name" class="form-label">Nama / Judul Paket</label>
+                    <input type="text" id="modal-pkg-name" class="form-input" placeholder="Contoh: Paket E - Susulan / Remedial" required>
+                </div>
+                <div class="form-group" style="margin-bottom: 0.85rem;">
+                    <label for="modal-pkg-desc" class="form-label">Deskripsi / Petunjuk Paket (Opsional)</label>
+                    <textarea id="modal-pkg-desc" class="form-input" rows="3" placeholder="Informasi materi ujian, instruksi khusus, dll. yang tampil ke mahasiswa..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.88rem;">
+                        <input type="checkbox" id="modal-pkg-active" checked style="width: 16px; height: 16px;">
+                        <span>Aktifkan paket untuk mahasiswa (dapat dipilih di ruang tunggu)</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer" style="flex-shrink: 0; padding: 0.75rem 1.25rem; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 0.5rem; background-color: var(--modal-footer-bg);">
+                <button type="button" class="btn btn-secondary" onclick="closePackageModal()">Batal</button>
+                <button type="submit" class="btn btn-primary" id="btn-save-package">Simpan Paket</button>
+            </div>
+        </form>
     </div>
 
     <!-- Modal Form: Add / Edit Question -->
     <div class="modal-backdrop" id="question-modal" style="display: none;" role="dialog" aria-modal="true">
-        <div class="modal-dialog">
-            <div class="modal-header">
+        <form class="modal-dialog" style="max-width: min(740px, 96vw); max-height: min(88vh, calc(100vh - 3rem)); display: flex; flex-direction: column; overflow: hidden; margin: auto; background-color: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);" onsubmit="saveQuestionForm(event)">
+            <div class="modal-header" style="flex-shrink: 0; padding: 0.95rem 1.25rem; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; background-color: var(--bg-surface);">
                 <h3 id="q-modal-title">Tambah Soal Ujian Baru</h3>
                 <button type="button" class="btn btn-secondary btn-sm" onclick="closeQuestionModal()">&times;</button>
             </div>
-            <form onsubmit="saveQuestionForm(event)">
-                <div class="modal-body">
-                    <input type="hidden" id="modal-q-id">
-
-                    <div style="display: grid; grid-template-columns: 120px 1fr; gap: 0.75rem;">
-                        <div class="form-group">
-                            <label for="modal-q-num" class="form-label">No. Soal</label>
-                            <input type="number" id="modal-q-num" class="form-input" min="1" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="modal-q-title" class="form-label">Judul Soal</label>
-                            <input type="text" id="modal-q-title" class="form-input"
-                                placeholder="Contoh: Filter Pelanggan Berdasarkan Kota" required>
-                        </div>
-                    </div>
-
+            <div class="modal-body" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 1.25rem; overscroll-behavior: contain;">
+                <input type="hidden" id="modal-q-id">
+                <div class="modal-three-col-grid">
                     <div class="form-group">
-                        <label for="modal-q-weight" class="form-label">Bobot Nilai (Poin)</label>
-                        <input type="number" id="modal-q-weight" class="form-input" min="1" max="100" value="15"
-                            required>
+                        <label for="modal-q-category" class="form-label">Paket Soal</label>
+                        <select id="modal-q-category" class="form-input" required>
+                            <option value="A">Paket A</option>
+                            <option value="B">Paket B</option>
+                            <option value="C">Paket C</option>
+                            <option value="D">Paket D</option>
+                        </select>
                     </div>
-
                     <div class="form-group">
-                        <label for="modal-q-desc" class="form-label">Deskripsi & Instruksi Soal (Mendukung Markdown
-                            **bold** dan `code`)</label>
-                        <textarea id="modal-q-desc" class="form-input" rows="5"
-                            placeholder="Tuliskan instruksi tabel dan kolom yang harus ditampilkan..."
-                            required></textarea>
+                        <label for="modal-q-num" class="form-label">No. Soal</label>
+                        <input type="number" id="modal-q-num" class="form-input" min="1" required>
                     </div>
-
                     <div class="form-group">
-                        <label for="modal-q-expected" class="form-label">Kunci Jawaban Query (Opsional - Sebagai
-                            referensi acuan dosen)</label>
-                        <textarea id="modal-q-expected" class="form-input" rows="3"
-                            placeholder="SELECT customer_name FROM customers WHERE ...;"></textarea>
+                        <label for="modal-q-title" class="form-label">Judul Soal</label>
+                        <input type="text" id="modal-q-title" class="form-input"
+                            placeholder="Contoh: Filter Pelanggan Berdasarkan Kota" required>
                     </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeQuestionModal()">Batal</button>
-                    <button type="submit" class="btn btn-primary">Simpan Soal</button>
+
+                <div class="form-group">
+                    <label for="modal-q-weight" class="form-label">Bobot Nilai (Poin)</label>
+                    <input type="number" id="modal-q-weight" class="form-input" min="1" max="100" value="15"
+                        required>
                 </div>
-            </form>
-        </div>
+
+                <div class="form-group">
+                    <label for="modal-q-desc" class="form-label">Deskripsi & Instruksi Soal (Mendukung Markdown
+                        **bold** dan `code`)</label>
+                    <textarea id="modal-q-desc" class="form-input" rows="3" style="resize: vertical; min-height: 64px; max-height: 160px;"
+                        placeholder="Tuliskan instruksi tabel dan kolom yang harus ditampilkan..."
+                        required></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="modal-q-expected" class="form-label">Kunci Jawaban Query (Opsional - Sebagai
+                        referensi acuan dosen)</label>
+                    <textarea id="modal-q-expected" class="form-input" rows="2" style="resize: vertical; min-height: 52px; max-height: 140px; font-family: var(--font-mono); font-size: 0.85rem;"
+                        placeholder="SELECT customer_name FROM customers WHERE ...;"></textarea>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr; gap: 0.75rem; margin-top: 0.5rem;">
+                    <div class="form-group">
+                        <label for="modal-q-target-db" class="form-label">Target Database</label>
+                        <select id="modal-q-target-db" class="form-input">
+                            <option value="pagila" selected>pagila (Master)</option>
+                            <option value="sandbox_pribadi">sandbox_pribadi (Easy DDL/DML)</option>
+                            <option value="classicmodels">classicmodels (Sales)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 0.5rem;">
+                    <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                        <span>Screenshot Ekspektasi Output Tabel</span>
+                        <span style="font-size:0.75rem; color:var(--text-muted);">(Tabel Acuan Dosen)</span>
+                    </label>
+                    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+                        <input type="file" id="modal-q-image-file" accept="image/*" style="display: none;" onchange="handleQuestionImageUpload(event)">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('modal-q-image-file').click()" style="white-space: nowrap;">
+                            📁 Unggah Screenshot...
+                        </button>
+                        <input type="text" id="modal-q-image-url" class="form-input form-input-sm" placeholder="/static/uploads/questions/... atau URL gambar" style="flex: 1; font-size: 0.8rem;">
+                        <button type="button" class="btn btn-danger btn-sm" id="btn-clear-image" onclick="clearQuestionImage()" title="Hapus Gambar" style="display: none;">✕</button>
+                    </div>
+                    <div id="modal-q-image-preview-wrap" style="display: none; margin-top: 0.5rem; padding: 0.4rem; background: var(--bg-surface-elevated, #0f172a); border: 1px solid var(--border-subtle, #334155); border-radius: 6px; text-align: center;">
+                        <img id="modal-q-image-preview" src="" alt="Preview Output Tabel" style="max-height: 120px; max-width: 100%; object-fit: contain; border-radius: 4px;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="flex-shrink: 0; padding: 0.75rem 1.25rem; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 0.5rem; background-color: var(--modal-footer-bg);">
+                <button type="button" class="btn btn-secondary" onclick="closeQuestionModal()">Batal</button>
+                <button type="submit" class="btn btn-primary">Simpan Soal</button>
+            </div>
+        </form>
     </div>
 
     <!-- Modal: Ubah Password Master Admin -->
     <div class="modal-backdrop" id="change-pw-modal" style="display: none;" role="dialog" aria-modal="true"
         aria-labelledby="change-pw-modal-title">
-        <div class="modal-card" style="max-width: 440px;">
-            <div class="modal-header">
+        <form class="modal-card" id="form-change-password" style="max-width: min(450px, 96vw); max-height: min(88vh, calc(100vh - 3rem)); display: flex; flex-direction: column; overflow: hidden; margin: auto; background-color: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);">
+            <div class="modal-header" style="flex-shrink: 0; padding: 0.95rem 1.25rem; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; background-color: var(--bg-surface);">
                 <h3 id="change-pw-modal-title" style="font-size: 1.15rem;">Ubah Password Master Admin</h3>
                 <button type="button" class="modal-close-btn"
                     onclick="document.getElementById('change-pw-modal').style.display='none'">&times;</button>
             </div>
-            <form id="form-change-password">
-                <div class="modal-body">
-                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
-                        Password ini digunakan untuk autentikasi login ke portal pengawas (<code>/admin/login</code>).
-                    </p>
-                    <div id="change-pw-alert"
-                        style="display: none; padding: 0.75rem; border-radius: var(--radius-sm); margin-bottom: 1rem; font-size: 0.85rem;">
-                    </div>
-                    <div class="form-group" style="margin-bottom: 0.85rem;">
-                        <label for="current-master-pw" class="form-label">Password Saat Ini</label>
-                        <input type="password" id="current-master-pw" class="form-input" required
-                            placeholder="Password saat ini (default: admin123)">
-                    </div>
-                    <div class="form-group" style="margin-bottom: 0.85rem;">
-                        <label for="new-master-pw" class="form-label">Password Baru</label>
-                        <input type="password" id="new-master-pw" class="form-input" required
-                            placeholder="Minimal 4 karakter">
-                    </div>
-                    <div class="form-group">
-                        <label for="confirm-master-pw" class="form-label">Konfirmasi Password Baru</label>
-                        <input type="password" id="confirm-master-pw" class="form-input" required
-                            placeholder="Ulangi password baru">
-                    </div>
+            <div class="modal-body" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 1.25rem; overscroll-behavior: contain;">
+                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+                    Password ini digunakan untuk autentikasi login ke portal pengawas (<code>/admin/login</code>).
+                </p>
+                <div id="change-pw-alert"
+                    style="display: none; padding: 0.75rem; border-radius: var(--radius-sm); margin-bottom: 1rem; font-size: 0.85rem;">
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary"
-                        onclick="document.getElementById('change-pw-modal').style.display='none'">Batal</button>
-                    <button type="submit" class="btn btn-primary" id="btn-save-master-pw">Simpan Password</button>
+                <div class="form-group" style="margin-bottom: 0.85rem;">
+                    <label for="current-master-pw" class="form-label">Password Saat Ini</label>
+                    <input type="password" id="current-master-pw" class="form-input" required
+                        placeholder="Password saat ini (default: admin123)">
                 </div>
-            </form>
-        </div>
+                <div class="form-group" style="margin-bottom: 0.85rem;">
+                    <label for="new-master-pw" class="form-label">Password Baru</label>
+                    <input type="password" id="new-master-pw" class="form-input" required
+                        placeholder="Minimal 4 karakter">
+                </div>
+                <div class="form-group">
+                    <label for="confirm-master-pw" class="form-label">Konfirmasi Password Baru</label>
+                    <input type="password" id="confirm-master-pw" class="form-input" required
+                        placeholder="Ulangi password baru">
+                </div>
+            </div>
+            <div class="modal-footer" style="flex-shrink: 0; padding: 0.75rem 1.25rem; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 0.5rem; background-color: var(--modal-footer-bg);">
+                <button type="button" class="btn btn-secondary"
+                    onclick="document.getElementById('change-pw-modal').style.display='none'">Batal</button>
+                <button type="submit" class="btn btn-primary" id="btn-save-master-pw">Simpan Password</button>
+            </div>
+        </form>
     </div>
 
     <!-- ERD Diagram Modal -->
+
     <div id="erd-diagram-modal" style="display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.85);backdrop-filter:blur(4px);flex-direction:column;" role="dialog" aria-modal="true" aria-label="Diagram ERD Database">
+
         <div style="display:flex;align-items:center;justify-content:space-between;padding:.65rem 1.25rem;background:var(--bg-surface);border-bottom:1px solid var(--border-subtle);flex-shrink:0;">
+
             <div style="display:flex;align-items:center;gap:.75rem;">
+
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="18" y="3" width="4" height="4" rx="1"/><rect x="6" y="17" width="4" height="4" rx="1"/><rect x="14" y="17" width="4" height="4" rx="1"/><line x1="4" y1="7" x2="4" y2="14"/><line x1="12" y1="7" x2="12" y2="14"/><line x1="20" y1="7" x2="20" y2="14"/><line x1="4" y1="14" x2="20" y2="14"/><line x1="8" y1="17" x2="8" y2="14"/><line x1="16" y1="17" x2="16" y2="14"/></svg>
+
                 <span style="font-weight:700;font-size:.95rem;color:var(--text-main);">Diagram Relasi ERD — classicmodels</span>
+
                 <span style="font-size:.75rem;color:var(--text-subtle);margin-left:0.5rem;">Susunan Terstruktur &amp; Bebas Tumpang Tindih</span>
+
             </div>
+
             <div style="display:flex;gap:.5rem;align-items:center;">
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="erdResetLayout()" title="Kembalikan susunan diagram ke posisi teratur default" style="display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .65rem;font-size:.8rem;">
+
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+
                     Rapikan Posisi
+
                 </button>
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="erdResetView()" title="Pusatkan tampilan" style="padding:.3rem .65rem;font-size:.8rem;">Pusatkan</button>
+
                 <div style="display:inline-flex;align-items:center;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);overflow:hidden;">
+
                     <button type="button" class="btn btn-secondary btn-sm" onclick="erdZoomOut()" title="Zoom out" style="padding:.25rem .55rem;border:none;border-radius:0;font-size:1rem;line-height:1;">&#8722;</button>
+
                     <button type="button" class="btn btn-secondary btn-sm" onclick="erdZoomIn()" title="Zoom in" style="padding:.25rem .55rem;border:none;border-radius:0;font-size:1rem;line-height:1;">&#43;</button>
+
                 </div>
+
                 <button type="button" class="btn btn-secondary btn-sm" onclick="closeErdDiagram()" aria-label="Tutup" style="padding:.25rem .65rem;font-size:1.2rem;line-height:1;margin-left:.25rem;">&times;</button>
+
             </div>
+
         </div>
+
         <!-- Legend & Instructions -->
+
         <div style="display:flex;justify-content:space-between;align-items:center;padding:.4rem 1.25rem;background:var(--bg-surface);border-bottom:1px solid var(--border-subtle);flex-shrink:0;font-size:.72rem;color:var(--text-muted);flex-wrap:wrap;gap:.75rem;">
+
             <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;">
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#6366f1;"></span>Organisasi</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#059669;"></span>Pelanggan &amp; Bayar</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#0284c7;"></span>Katalog Produk</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#d97706;"></span>Pesanan &amp; Detail</span>
+
                 <span style="display:inline-block;width:1px;height:14px;background:var(--border-subtle);margin:0 .25rem;"></span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;padding:1px 4px;border-radius:2px;background:rgba(245,158,11,0.2);color:#f59e0b;font-weight:700;font-size:.65rem;">PK</span> Primary Key</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;padding:1px 4px;border-radius:2px;background:rgba(99,102,241,0.2);color:#6366f1;font-weight:700;font-size:.65rem;">FK</span> Foreign Key</span>
+
                 <span style="display:flex;align-items:center;gap:.35rem;"><span style="display:inline-block;width:28px;height:2px;background:#6366f1;position:relative;"></span>FK ●───► PK</span>
+
             </div>
+
             <div style="color:var(--text-subtle);">
+
                 💡 Drag kartu: Geser posisi &bull; Drag kanvas: Pan &bull; Scroll: Zoom &bull; Klik tabel: Sorot relasi
+
             </div>
+
         </div>
+
         <div style="flex:1;overflow:hidden;position:relative;" id="erd-canvas-wrapper">
+
             <canvas id="erd-diagram-canvas" style="display:block;width:100%;height:100%;"></canvas>
+
         </div>
+
     </div>
 
-    <script src="/static/js/admin.js?v=2"></script>
+
+
+    <script src="/static/js/admin.js?v=20261101_v7"></script>
+
+
 
 </body>
+
+
 
 </html>

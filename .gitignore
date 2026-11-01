@@ -12,6 +12,7 @@ env/
 venv/
 .venv/
 ENV/
+.env
 
 # Database files
 *.db
@@ -25,3 +26,6 @@ Desktop.ini
 # IDE files
 .vscode/
 .idea/
+
+# Scratch and test artifacts
+scratch/
