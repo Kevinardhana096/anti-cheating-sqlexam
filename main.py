@@ -1,21 +1,21 @@
 import os
 import uuid
 import socket
-from typing import Optional, Dict, Any
+import time
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Union
 from contextlib import asynccontextmanager
 
 from fastapi import (
-    FastAPI, 
-    Request, 
-    Response, 
-    Depends, 
-    HTTPException, 
-    status, 
-    Form, 
-    UploadFile, 
-    File,
-    WebSocket,
-    WebSocketDisconnect
+    FastAPI,
+    Request,
+    Response,
+    Depends,
+    HTTPException,
+    status,
+    Form,
+    UploadFile,
+    File
 )
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI):
     database.init_system_db()
     pg_ok, pg_msg = database.init_postgres_db()
     health = database.verify_system_health()
+    if database.get_admin_master_key() == "admin123":
+        print("[PERINGATAN KEAMANAN P0] Master key admin masih menggunakan password bawaan ('admin123').")
+        print("  Disarankan mengganti password melalui portal admin (/admin) sebelum pelaksanaan ujian!")
     print("---------------------------------------------------------")
     print("Offline SQL Exam System Server Starting...")
     print(f"System SQLite DB Status      : {'OK' if health['sqlite'] else 'ERROR'}")
@@ -67,60 +70,75 @@ async def add_no_cache_headers(request: Request, call_next):
 # Master Key Session Token for Admin / Lecturer (generated dynamically on start)
 CURRENT_ADMIN_SESSION_TOKEN = str(uuid.uuid4())
 
+
+
+import time
+import threading
+from collections import defaultdict
+
 # ==============================================================================
-# WebSocket Real-Time Waiting Room Hub
+# P0 Security Hardening: In-Memory Rate Limiter, CSRF, and Cookie Helpers
 # ==============================================================================
-class WaitingRoomHub:
+class InMemoryRateLimiter:
+    """Thread-safe in-memory sliding window rate limiter."""
     def __init__(self):
-        self.students: Dict[str, WebSocket] = {}
-        self.admins: set[WebSocket] = set()
+        self._history = defaultdict(list)
+        self._lock = threading.Lock()
 
-    async def connect_student(self, nim: str, ws: WebSocket):
-        await ws.accept()
-        self.students[nim] = ws
+    def check(self, key: str, max_requests: int, window_seconds: int) -> bool:
+        now = time.time()
+        cutoff = now - window_seconds
+        with self._lock:
+            timestamps = [t for t in self._history[key] if t > cutoff]
+            if len(timestamps) >= max_requests:
+                self._history[key] = timestamps
+                return False
+            timestamps.append(now)
+            self._history[key] = timestamps
+            return True
 
-    def disconnect_student(self, nim: str):
-        self.students.pop(nim, None)
+rate_limiter = InMemoryRateLimiter()
 
-    async def connect_admin(self, ws: WebSocket):
-        await ws.accept()
-        self.admins.add(ws)
-
-    def disconnect_admin(self, ws: WebSocket):
-        self.admins.discard(ws)
-
-    async def broadcast_to_all(self, payload: dict):
-        targets = list(self.students.values()) + list(self.admins)
-        for ws in targets:
+def verify_csrf_origin(request: Request) -> None:
+    """
+    Validates Origin and Referer headers against Host on mutating HTTP requests.
+    Mitigates Cross-Site Request Forgery (CSRF).
+    """
+    if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+        host = request.headers.get("host")
+        if not host:
+            return
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        if origin:
+            origin_host = origin.split("://")[-1].rstrip("/")
+            if origin_host != host:
+                raise HTTPException(status_code=403, detail="Permintaan ditolak: CSRF Origin tidak valid.")
+        elif referer:
             try:
-                await ws.send_json(payload)
+                referer_host = referer.split("://")[1].split("/")[0]
+                if referer_host != host:
+                    raise HTTPException(status_code=403, detail="Permintaan ditolak: CSRF Referer tidak valid.")
             except Exception:
                 pass
 
-    async def broadcast_message(self, message_dict: dict):
-        await self.broadcast_to_all({
-            "event": "NEW_MESSAGE",
-            "message": message_dict
-        })
-
-    async def broadcast_participants(self, participants: list):
-        await self.broadcast_to_all({
-            "event": "PARTICIPANTS_UPDATE",
-            "participants": participants,
-            "count": len(participants)
-        })
-
-    async def broadcast_exam_start(self):
-        await self.broadcast_to_all({
-            "event": "EXAM_STARTED"
-        })
-
-    async def broadcast_exam_stop(self):
-        await self.broadcast_to_all({
-            "event": "EXAM_STOPPED"
-        })
-
-waiting_hub = WaitingRoomHub()
+def set_secure_cookie(
+    response: Response,
+    key: str,
+    value: str,
+    request: Request,
+    max_age: int = 28800  # 8 hours
+) -> None:
+    """Sets an audited secure, HttpOnly, SameSite=Lax cookie with explicit expiration."""
+    is_https = request.url.scheme == "https"
+    response.set_cookie(
+        key=key,
+        value=value,
+        httponly=True,
+        samesite="lax",
+        max_age=max_age,
+        secure=is_https
+    )
 
 def get_local_host_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -140,6 +158,39 @@ def get_client_ip(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "127.0.0.1"
+
+# ==============================================================================
+# Health & Readiness Probes (P2)
+# ==============================================================================
+@app.get("/health")
+def health_check():
+    """Liveness probe: returns status 200 if FastAPI is accepting HTTP requests."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/ready")
+def readiness_check():
+    """Readiness probe: validates SQLite, PostgreSQL admin/student connections, and connection pool."""
+    health = database.verify_system_health()
+    pool_stats = database.get_pool_stats()
+    is_ready = bool(health.get("sqlite") and health.get("postgres_admin") and health.get("postgres_student"))
+    status_code = 200 if is_ready else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ready" if is_ready else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "databases": {
+                "sqlite": health.get("sqlite", False),
+                "postgres_admin": health.get("postgres_admin", False),
+                "postgres_student": health.get("postgres_student", False),
+            },
+            "pool": pool_stats,
+            "details": health.get("details", {})
+        }
+    )
 
 # ==============================================================================
 # Pydantic Request Models
@@ -182,7 +233,9 @@ class SaveQuestionRequest(BaseModel):
     expected_query: Optional[str] = None
     target_database: Optional[str] = "pagila"
     difficulty_level: Optional[str] = "Medium"
-    expected_output_image: Optional[str] = ""
+    expected_output_image: Optional[Union[str, List[str]]] = ""
+    expected_output_images: Optional[List[str]] = None
+    question_images: Optional[Union[str, List[str]]] = None
 
 class KickStudentRequest(BaseModel):
     nim: str
@@ -218,7 +271,8 @@ def index_route(request: Request):
     if token and nim:
         is_valid, user, _ = database.validate_student_session(nim, token, client_ip)
         if is_valid:
-            return RedirectResponse(url="/waiting", status_code=status.HTTP_302_FOUND)
+            target_url = "/exam" if database.get_exam_state() == "active" else "/waiting"
+            return RedirectResponse(url=target_url, status_code=status.HTTP_302_FOUND)
 
     return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
 
@@ -233,9 +287,18 @@ def login_page(request: Request, error: Optional[str] = None, message: Optional[
 @app.post("/login")
 def handle_login(
     request: Request,
-    nim: str = Form(...),
-    name: str = Form(...)
+    nim: str = Form(""),
+    name: str = Form(""),
+    device_id: Optional[str] = Form(None)
 ):
+    verify_csrf_origin(request)
+    client_ip = get_client_ip(request)
+    if not rate_limiter.check(f"student_login:{client_ip}", max_requests=15, window_seconds=60):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"error": "Terlalu banyak percobaan login. Silakan tunggu sejenak.", "nim_value": nim, "name_value": name}
+        )
     nim = nim.strip()
     name = name.strip()
     if not nim or not name:
@@ -245,10 +308,10 @@ def handle_login(
             context={"error": "NIM dan Nama Lengkap wajib diisi!", "nim_value": nim, "name_value": name}
         )
 
-    client_ip = get_client_ip(request)
+    effective_device_id = (device_id or "").strip() or request.cookies.get("device_id")
     new_session_token = str(uuid.uuid4())
 
-    success, user, error_msg = database.login_student(nim, name, client_ip, new_session_token)
+    success, user, error_msg = database.login_student(nim, name, client_ip, new_session_token, effective_device_id)
 
     if not success:
         return templates.TemplateResponse(
@@ -257,9 +320,12 @@ def handle_login(
             context={"error": error_msg, "nim_value": nim, "name_value": name}
         )
 
-    response = RedirectResponse(url="/waiting", status_code=status.HTTP_302_FOUND)
-    response.set_cookie(key="student_token", value=new_session_token, httponly=True)
-    response.set_cookie(key="student_nim", value=nim, httponly=True)
+    target_url = "/exam" if database.get_exam_state() == "active" else "/waiting"
+    response = RedirectResponse(url=target_url, status_code=status.HTTP_302_FOUND)
+    set_secure_cookie(response, "student_token", new_session_token, request)
+    set_secure_cookie(response, "student_nim", nim, request)
+    if effective_device_id:
+        set_secure_cookie(response, "device_id", effective_device_id, request)
     return response
 
 @app.get("/waiting", response_class=HTMLResponse)
@@ -400,7 +466,7 @@ def api_student_databases(request: Request, nim: Optional[str] = None):
     """Returns the list of allowed databases for students, including default database and student virtual db if any."""
     student_nim = (nim or request.cookies.get("student_nim") or "").strip()
     virtual_db = database.get_student_virtual_database(student_nim) if student_nim else None
-    
+
     dbs = []
     for db_item in database.get_allowed_databases():
         d = dict(db_item)
@@ -418,42 +484,55 @@ def api_student_databases(request: Request, nim: Optional[str] = None):
 
 @app.post("/api/student/run-query")
 def api_student_run_query(req: RunQueryRequest, request: Request):
+    verify_csrf_origin(request)
     client_ip = get_client_ip(request)
     is_valid, user, reason = database.validate_student_session(req.nim, req.session_token, client_ip)
     if not is_valid or not user:
-        return {"success": False, "error": f"Otorisasi Sesi Gagal: {reason}"}
+        raise HTTPException(status_code=401, detail=f"Otorisasi Sesi Gagal: {reason}")
 
-    active_db = (req.active_database or database.DEFAULT_EXAM_DB).strip()
+    if not rate_limiter.check(f"run_query:{req.nim}:{client_ip}", max_requests=40, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Terlalu banyak eksekusi query. Silakan tunggu beberapa detik.")
+
+    if len(req.query or "") > database.MAX_STUDENT_QUERY_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Panjang query melebihi batas {database.MAX_STUDENT_QUERY_LENGTH} karakter.")
+
+    active_db = (req.active_database or database.DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
+    if active_db not in database.ALLOWED_STUDENT_DBS:
+        raise HTTPException(status_code=400, detail="Database target tidak valid.")
 
     # Execute inside PostgreSQL sandbox for the designated database and student NIM
     result = database.execute_student_query(req.query, active_db=active_db, nim=req.nim)
-    
-    # Log query execution
-    database.log_exam_event(
-        user["id"], 
-        "run_query", 
-        f"Eksekusi query [{active_db}] ({len(req.query)} karakter) - Status: {'Sukses' if result.get('success') else 'Error'}"
-    )
+
+    # Routine query logging removed to optimize SQLite performance and prevent log table bloat
     return result
 
 @app.post("/api/student/submit")
 def api_student_submit(req: SubmitAnswerRequest, request: Request):
+    verify_csrf_origin(request)
     client_ip = get_client_ip(request)
     is_valid, user, reason = database.validate_student_session(req.nim, req.session_token, client_ip)
     if not is_valid or not user:
-        return {"status": "error", "message": f"Otorisasi Sesi Gagal: {reason}"}
+        raise HTTPException(status_code=401, detail=f"Otorisasi Sesi Gagal: {reason}")
+
+    if not rate_limiter.check(f"submit:{req.nim}:{client_ip}", max_requests=25, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Terlalu banyak permintaan submit. Silakan tunggu beberapa detik.")
+
+    if len(req.query or "") > database.MAX_STUDENT_QUERY_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Panjang query melebihi batas {database.MAX_STUDENT_QUERY_LENGTH} karakter.")
+    if not is_valid or not user:
+        raise HTTPException(status_code=401, detail=f"Otorisasi Sesi Gagal: {reason}")
 
     selected_cat = user.get("selected_category")
     if not selected_cat:
-        return {"status": "error", "message": "Anda belum memilih paket soal ujian!"}
+        raise HTTPException(status_code=400, detail="Anda belum memilih paket soal ujian!")
 
     # Guard: verify question exists and belongs to user's locked category
     question = database.get_question_by_id(req.question_id)
     if not question:
-        return {"status": "error", "message": "Soal tidak ditemukan."}
+        raise HTTPException(status_code=404, detail="Soal tidak ditemukan.")
 
     if (question.get("category") or "A").upper() != selected_cat.upper():
-        return {"status": "error", "message": "Soal ini tidak sesuai dengan paket soal yang Anda pilih."}
+        raise HTTPException(status_code=400, detail="Soal ini tidak sesuai dengan paket soal yang Anda pilih.")
 
     expected_query = question.get("expected_query") or ""
     score_weight = int(question.get("score_weight") or 10)
@@ -471,7 +550,7 @@ def api_student_submit(req: SubmitAnswerRequest, request: Request):
     )
 
     is_correct_int = 1 if eval_res["is_correct"] else 0
-    database.save_submission(
+    save_res = database.save_submission(
         user_id=user["id"],
         question_id=req.question_id,
         submitted_query=req.query,
@@ -481,12 +560,23 @@ def api_student_submit(req: SubmitAnswerRequest, request: Request):
         feedback=eval_res["feedback"]
     )
 
+    effective_score = save_res["score"]
+    effective_is_correct = save_res["is_correct"]
+    score_retained = save_res.get("score_retained", False)
+
     student_res = eval_res.get("student_result") or {}
     return {
         "status": "success",
-        "is_correct": eval_res["is_correct"],
-        "score": eval_res["score"],
+        "is_correct": effective_is_correct,
+        "score": effective_score,
         "max_score": score_weight,
+        "score_retained": score_retained,
+        "previous_score": save_res.get("previous_score", 0),
+        "new_score": save_res.get("new_score", 0),
+        "retained_message": (
+            f"Kueri terbaru Anda belum sesuai, namun skor tertinggi Anda sebelumnya (+{effective_score} Poin) tetap aman dipertahankan."
+            if score_retained else ""
+        ),
         "eval_status": eval_res["eval_status"],
         "feedback": eval_res["feedback"],
         "target_database": target_database,
@@ -537,7 +627,7 @@ def api_student_schema_full(request: Request, db: Optional[str] = None):
     is_valid, _, _ = database.validate_student_session(nim, token, client_ip)
     if not is_valid:
         raise HTTPException(status_code=401, detail="Sesi tidak valid.")
-    
+
     target_db = (db or database.DEFAULT_EXAM_DB).strip()
     schema = database.get_database_schema(db_name=target_db, nim=nim)
     relations = database.get_database_fk_relations(db_name=target_db, nim=nim)
@@ -567,11 +657,21 @@ def admin_login_page(request: Request, error: Optional[str] = None):
     )
 
 @app.post("/admin/login")
-def admin_handle_login(master_key: str = Form(...)):
+def admin_handle_login(request: Request, master_key: str = Form("")):
+    verify_csrf_origin(request)
+    client_ip = get_client_ip(request)
+    if not rate_limiter.check(f"admin_login:{client_ip}", max_requests=6, window_seconds=30):
+        return RedirectResponse(url="/admin/login?error=Terlalu+banyak+percobaan+login.+Silakan+tunggu+30+detik.", status_code=status.HTTP_302_FOUND)
+
+    if not master_key.strip():
+        return RedirectResponse(url="/admin/login?error=Master+Key+wajib+diisi!", status_code=status.HTTP_302_FOUND)
+
     stored_key = database.get_admin_master_key()
     if master_key.strip() == stored_key:
+        global CURRENT_ADMIN_SESSION_TOKEN
+        CURRENT_ADMIN_SESSION_TOKEN = str(uuid.uuid4())  # Rotate admin session token on login
         res = RedirectResponse(url="/admin", status_code=status.HTTP_302_FOUND)
-        res.set_cookie(key="admin_session", value=CURRENT_ADMIN_SESSION_TOKEN, httponly=True)
+        set_secure_cookie(res, "admin_session", CURRENT_ADMIN_SESSION_TOKEN, request)
         return res
 
     return RedirectResponse(url="/admin/login?error=Master+Key+salah!", status_code=status.HTTP_302_FOUND)
@@ -582,10 +682,11 @@ def admin_dashboard(request: Request):
         return RedirectResponse(url="/admin/login", status_code=status.HTTP_302_FOUND)
 
     host_ip = get_local_host_ip()
+    is_default_master_key = (database.get_admin_master_key() == "admin123")
     return templates.TemplateResponse(
         request=request,
         name="admin.html",
-        context={"host_ip": host_ip}
+        context={"host_ip": host_ip, "is_default_master_key": is_default_master_key}
     )
 
 @app.get("/admin/logout")
@@ -611,26 +712,21 @@ def api_admin_students(request: Request):
 def api_admin_kick_student(req: KickStudentRequest, request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    
-    conn = database.get_sqlite_conn()
-    with conn:
-        conn.execute(
-            """
-            UPDATE users 
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline' 
-            WHERE nim = ?;
-            """,
-            (req.nim,)
-        )
-        conn.execute(
-            """
-            INSERT INTO exam_logs (action_type, details)
-            VALUES ('kick', ?);
-            """,
-            (f"Pengawas me-reset sesi untuk NIM {req.nim}",)
-        )
-    conn.close()
-    return {"status": "success", "message": f"Sesi mahasiswa {req.nim} telah direset."}
+
+    success, msg = database.clear_student_session_lock(req.nim)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+@app.post("/api/admin/clear-session-lock")
+def api_admin_clear_session_lock(req: KickStudentRequest, request: Request):
+    if not verify_admin_auth(request):
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+
+    success, msg = database.clear_student_session_lock(req.nim)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
 
 @app.post("/api/admin/stop-all-sessions")
 def api_admin_stop_all_sessions(request: Request):
@@ -660,17 +756,22 @@ def api_admin_clear_sessions(req: ClearSessionsRequest, request: Request):
 def api_admin_change_password(req: ChangePasswordRequest, request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    
+
     current_key = database.get_admin_master_key()
     if req.current_password.strip() != current_key:
-        return {"success": False, "message": "Password lama tidak sesuai!"}
-    
+        raise HTTPException(status_code=400, detail="Password lama tidak sesuai!")
+
     new_pw = req.new_password.strip()
     if not new_pw or len(new_pw) < 4:
-        return {"success": False, "message": "Password baru minimal 4 karakter!"}
-    
+        raise HTTPException(status_code=400, detail="Password baru minimal 4 karakter!")
+
     database.update_admin_master_key(new_pw)
-    return {"success": True, "message": "Password master admin berhasil diperbarui!"}
+    database.log_exam_event(None, "change_password", "Pengawas memperbarui master key admin.")
+    global CURRENT_ADMIN_SESSION_TOKEN
+    CURRENT_ADMIN_SESSION_TOKEN = str(uuid.uuid4())
+    res = JSONResponse(content={"status": "success", "success": True, "message": "Password master admin berhasil diperbarui!"})
+    set_secure_cookie(res, "admin_session", CURRENT_ADMIN_SESSION_TOKEN, request)
+    return res
 
 @app.get("/api/admin/questions")
 def api_admin_questions(request: Request, category: Optional[str] = None):
@@ -686,6 +787,9 @@ def api_admin_save_question(req: SaveQuestionRequest, request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
 
+    exp_imgs = req.expected_output_images if req.expected_output_images is not None else req.expected_output_image
+    q_imgs = req.question_images if req.question_images is not None else ""
+
     q_id = database.save_question(
         question_number=req.question_number,
         title=req.title,
@@ -696,27 +800,68 @@ def api_admin_save_question(req: SaveQuestionRequest, request: Request):
         question_id=req.question_id,
         target_database=req.target_database or database.DEFAULT_EXAM_DB,
         difficulty_level=req.difficulty_level or "Medium",
-        expected_output_image=req.expected_output_image or ""
+        expected_output_image=exp_imgs or "",
+        question_images=q_imgs or ""
     )
     return {
-        "status": "success", 
-        "id": q_id, 
+        "status": "success",
+        "id": q_id,
         "message": f"Soal Paket {req.category} #{req.question_number} berhasil disimpan."
     }
 
-@app.post("/api/admin/questions/upload-image")
-async def api_admin_upload_question_image(request: Request, image: UploadFile = File(...)):
+@app.post("/api/admin/questions/upload-images")
+async def api_admin_upload_question_images(
+    request: Request,
+    images: List[UploadFile] = File(...),
+    image_type: Optional[str] = Form("question")
+):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
 
     upload_dir = os.path.join(STATIC_DIR, "uploads", "questions")
     os.makedirs(upload_dir, exist_ok=True)
 
-    ext = os.path.splitext(image.filename)[1].lower() if image.filename else ".png"
-    if ext not in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
-        raise HTTPException(status_code=400, detail="Format file harus gambar (PNG, JPG, JPEG, WEBP, GIF).")
+    prefix = "qimg" if (image_type or "").lower() == "question" else "output"
+    uploaded_urls = []
+    allowed_exts = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]
 
-    file_id = f"output_{uuid.uuid4().hex[:12]}{ext}"
+    for img in images:
+        if not img.filename:
+            continue
+        ext = os.path.splitext(img.filename)[1].lower() if img.filename else ".png"
+        if ext not in allowed_exts:
+            raise HTTPException(status_code=400, detail=f"File '{img.filename}' bukan gambar yang didukung (PNG, JPG, JPEG, WEBP, GIF, SVG).")
+
+        file_id = f"{prefix}_{uuid.uuid4().hex[:12]}{ext}"
+        dest_path = os.path.join(upload_dir, file_id)
+
+        content = await img.read()
+        with open(dest_path, "wb") as f:
+            f.write(content)
+
+        uploaded_urls.append(f"/static/uploads/questions/{file_id}")
+
+    return {
+        "status": "success",
+        "image_urls": uploaded_urls,
+        "image_url": uploaded_urls[0] if uploaded_urls else "",
+        "count": len(uploaded_urls)
+    }
+
+@app.post("/api/admin/questions/upload-image")
+async def api_admin_upload_question_image(request: Request, image: UploadFile = File(...), image_type: Optional[str] = Form("output")):
+    if not verify_admin_auth(request):
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+
+    upload_dir = os.path.join(STATIC_DIR, "uploads", "questions")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    prefix = "qimg" if (image_type or "").lower() == "question" else "output"
+    ext = os.path.splitext(image.filename)[1].lower() if image.filename else ".png"
+    if ext not in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]:
+        raise HTTPException(status_code=400, detail="Format file harus gambar (PNG, JPG, JPEG, WEBP, GIF, SVG).")
+
+    file_id = f"{prefix}_{uuid.uuid4().hex[:12]}{ext}"
     dest_path = os.path.join(upload_dir, file_id)
 
     content = await image.read()
@@ -767,7 +912,7 @@ def api_admin_packages(request: Request, include_inactive: bool = True):
 def api_admin_create_package(req: CreatePackageRequest, request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    
+
     code = req.code.strip().upper()
     name = (req.name or f"Paket {code}").strip()
     desc = (req.description or "").strip()
@@ -854,20 +999,17 @@ def api_exam_state(request: Request):
     return {"state": database.get_exam_state()}
 
 @app.post("/api/admin/exam/start")
-async def api_admin_exam_start(request: Request):
+def api_admin_exam_start(request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak.")
     database.set_exam_state("active")
-    database.clear_waiting_room_messages()
-    await waiting_hub.broadcast_exam_start()
     return {"status": "success", "message": "Ujian dimulai. Seluruh peserta akan diarahkan ke lembar soal."}
 
 @app.post("/api/admin/exam/stop")
-async def api_admin_exam_stop(request: Request):
+def api_admin_exam_stop(request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak.")
     database.set_exam_state("waiting")
-    await waiting_hub.broadcast_exam_stop()
     return {"status": "success", "message": "Ujian dihentikan. Peserta tidak dapat mengakses soal."}
 
 @app.get("/api/waiting/participants")
@@ -883,37 +1025,7 @@ def api_waiting_participants(request: Request):
     participants = database.get_waiting_room_participants()
     return {"participants": participants, "count": len(participants)}
 
-@app.get("/api/waiting/messages")
-def api_waiting_messages(request: Request, since_id: int = 0):
-    token = request.cookies.get("student_token")
-    nim = request.cookies.get("student_nim")
-    client_ip = get_client_ip(request)
-    if not token or not nim:
-        raise HTTPException(status_code=401, detail="Tidak terautentikasi.")
-    is_valid, _, _ = database.validate_student_session(nim, token, client_ip)
-    if not is_valid:
-        raise HTTPException(status_code=401, detail="Sesi tidak valid.")
-    messages = database.get_waiting_room_messages(since_id=since_id)
-    return {"messages": messages}
 
-class WaitingMessageRequest(BaseModel):
-    message: str
-
-@app.post("/api/waiting/messages")
-async def api_post_waiting_message(request: Request, body: WaitingMessageRequest):
-    token = request.cookies.get("student_token")
-    nim = request.cookies.get("student_nim")
-    client_ip = get_client_ip(request)
-    if not token or not nim:
-        raise HTTPException(status_code=401, detail="Tidak terautentikasi.")
-    is_valid, user, _ = database.validate_student_session(nim, token, client_ip)
-    if not is_valid or not user:
-        raise HTTPException(status_code=401, detail="Sesi tidak valid.")
-    msg = database.post_waiting_room_message(nim, user["name"], body.message)
-    if not msg:
-        raise HTTPException(status_code=400, detail="Pesan kosong atau terlalu panjang.")
-    await waiting_hub.broadcast_message(msg)
-    return {"status": "ok", "message": msg}
 
 @app.post("/api/waiting/heartbeat")
 def api_waiting_heartbeat(request: Request):
@@ -937,123 +1049,7 @@ def api_admin_waiting_participants(request: Request):
     exam_state = database.get_exam_state()
     return {"participants": participants, "count": len(participants), "exam_state": exam_state}
 
-@app.get("/api/admin/waiting/messages")
-def api_admin_waiting_messages(request: Request, since_id: int = 0):
-    if not verify_admin_auth(request):
-        raise HTTPException(status_code=403, detail="Akses ditolak.")
-    messages = database.get_waiting_room_messages(since_id=since_id)
-    return {"messages": messages}
 
-@app.post("/api/admin/waiting/messages")
-async def api_admin_post_waiting_message(request: Request, body: WaitingMessageRequest):
-    if not verify_admin_auth(request):
-        raise HTTPException(status_code=403, detail="Akses ditolak.")
-    msg = database.post_waiting_room_message("ADMIN", "Pengawas", body.message)
-    if not msg:
-        raise HTTPException(status_code=400, detail="Pesan kosong atau terlalu panjang.")
-    await waiting_hub.broadcast_message(msg)
-    return {"status": "ok", "message": msg}
-
-@app.post("/api/admin/waiting/clear-messages")
-async def api_admin_clear_waiting_messages(request: Request):
-    if not verify_admin_auth(request):
-        raise HTTPException(status_code=403, detail="Akses ditolak.")
-    database.clear_waiting_room_messages()
-    await waiting_hub.broadcast_to_all({"event": "CLEAR_MESSAGES"})
-    return {"status": "success", "message": "Pesan chat waiting room berhasil dibersihkan."}
-
-@app.websocket("/ws/waiting")
-async def ws_waiting_endpoint(websocket: WebSocket):
-    token = websocket.cookies.get("student_token")
-    nim = websocket.cookies.get("student_nim")
-    client_ip = "127.0.0.1"
-    if websocket.client and websocket.client.host:
-        client_ip = websocket.client.host
-
-    if not token or not nim:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    is_valid, user, _ = database.validate_student_session(nim, token, client_ip)
-    if not is_valid or not user:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    await waiting_hub.connect_student(nim, websocket)
-    database.mark_student_waiting(nim)
-
-    # Kirim snapshot state awal ke mahasiswa
-    try:
-        await websocket.send_json({
-            "event": "INIT_STATE",
-            "exam_state": database.get_exam_state(),
-            "participants": database.get_waiting_room_participants(),
-            "messages": database.get_waiting_room_messages(since_id=0, limit=50)
-        })
-    except Exception:
-        pass
-
-    # Broadcast update daftar peserta ke semua klien
-    try:
-        await waiting_hub.broadcast_participants(database.get_waiting_room_participants())
-    except Exception:
-        pass
-
-    try:
-        while True:
-            data = await websocket.receive_json()
-            mtype = data.get("type")
-            if mtype == "PING":
-                database.heartbeat_student_waiting(nim)
-                await websocket.send_json({"event": "PONG"})
-            elif mtype == "CHAT":
-                text = str(data.get("message", "")).strip()
-                if text:
-                    msg = database.post_waiting_room_message(nim, user["name"], text)
-                    if msg:
-                        await waiting_hub.broadcast_message(msg)
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
-        waiting_hub.disconnect_student(nim)
-        try:
-            await waiting_hub.broadcast_participants(database.get_waiting_room_participants())
-        except Exception:
-            pass
-
-@app.websocket("/ws/admin")
-async def ws_admin_endpoint(websocket: WebSocket):
-    token = websocket.cookies.get("admin_session")
-    if not token or token != CURRENT_ADMIN_SESSION_TOKEN:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    await waiting_hub.connect_admin(websocket)
-
-    try:
-        await websocket.send_json({
-            "event": "INIT_STATE",
-            "exam_state": database.get_exam_state(),
-            "participants": database.get_waiting_room_participants(),
-            "messages": database.get_waiting_room_messages(since_id=0, limit=50)
-        })
-    except Exception:
-        pass
-
-    try:
-        while True:
-            data = await websocket.receive_json()
-            mtype = data.get("type")
-            if mtype == "CHAT":
-                text = str(data.get("message", "")).strip()
-                if text:
-                    msg = database.post_waiting_room_message("ADMIN", "Pengawas", text)
-                    if msg:
-                        await waiting_hub.broadcast_message(msg)
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
-        waiting_hub.disconnect_admin(websocket)
 
 @app.get("/api/admin/schema")
 def api_admin_schema(request: Request, db: Optional[str] = "pagila"):
@@ -1070,42 +1066,84 @@ def api_admin_schema(request: Request, db: Optional[str] = "pagila"):
         "available_databases": database.get_allowed_databases()
     }
 
+@app.get("/api/admin/table-data")
+def api_admin_table_data(request: Request, db: Optional[str] = "pagila", table: str = "", limit: int = 50, offset: int = 0):
+    if not verify_admin_auth(request):
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+    target_db = (db or "pagila").strip().lower()
+    if target_db not in database.ALLOWED_MASTER_DBS:
+        raise HTTPException(status_code=400, detail="Target database tidak valid.")
+    if not table:
+        raise HTTPException(status_code=400, detail="Parameter table diperlukan.")
+    try:
+        data = database.get_table_data(db_name=target_db, table_name=table, limit=limit, offset=offset)
+        return {"status": "success", **data}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal memuat data tabel: {e}")
+
 class ResetDatabaseAdminRequest(BaseModel):
     target_db: Optional[str] = "classicmodels"
 
 @app.post("/api/admin/reset-database")
 def api_admin_reset_database(request: Request, req: Optional[ResetDatabaseAdminRequest] = None):
+    verify_csrf_origin(request)
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    target_db = (req.target_db if req and req.target_db else "classicmodels").strip()
+
+    client_ip = get_client_ip(request)
+    if not rate_limiter.check(f"reset_db:{client_ip}", max_requests=6, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Terlalu banyak permintaan reset database. Silakan tunggu.")
+
+    target_db = (req.target_db if req and req.target_db else "classicmodels").strip().lower()
+    if target_db not in database.ALLOWED_MASTER_DBS:
+        raise HTTPException(status_code=400, detail="Target database tidak valid.")
     success, msg = database.reset_target_database(target_db=target_db)
-    return {"status": "success" if success else "error", "message": msg}
+    if not success:
+        raise HTTPException(status_code=500, detail=msg)
+    database.log_exam_event(None, "reset_database", f"Pengawas me-reset database '{target_db}' ke kondisi awal.")
+    return {"status": "success", "message": msg}
 
 @app.post("/api/admin/upload-sql")
 async def api_admin_upload_sql(
-    request: Request, 
-    file: UploadFile = File(...), 
+    request: Request,
+    file: UploadFile = File(...),
     target_db: Optional[str] = Form("classicmodels")
 ):
+    verify_csrf_origin(request)
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    
-    content_bytes = await file.read()
+
+    client_ip = get_client_ip(request)
+    if not rate_limiter.check(f"upload_sql:{client_ip}", max_requests=6, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Terlalu banyak permintaan unggah SQL. Silakan tunggu.")
+
+    MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB limit
+    content_bytes = await file.read(MAX_UPLOAD_SIZE + 1024)
+    if len(content_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="Ukuran file SQL melebihi batas maksimal (25 MB).")
+
     try:
         sql_text = content_bytes.decode("utf-8")
     except UnicodeDecodeError:
         sql_text = content_bytes.decode("latin-1")
 
-    db_choice = (target_db or "classicmodels").strip()
+    db_choice = (target_db or "classicmodels").strip().lower()
+    if db_choice not in database.ALLOWED_MASTER_DBS:
+        raise HTTPException(status_code=400, detail="Target database tidak valid.")
     success, msg = database.reset_target_database(target_db=db_choice, custom_sql_text=sql_text)
-    return {"status": "success" if success else "error", "message": msg}
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    database.log_exam_event(None, "upload_sql", f"Pengawas mengunggah custom dump SQL ke database '{db_choice}' ({len(sql_text)} karakter).")
+    return {"status": "success", "message": msg}
 
 @app.get("/api/admin/logs")
-def api_admin_logs(request: Request):
+def api_admin_logs(request: Request, limit: int = 50, offset: int = 0):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    logs = database.get_recent_exam_logs(limit=50)
-    return {"logs": logs}
+    logs, total = database.get_recent_exam_logs(limit=limit, offset=offset)
+    return {"logs": logs, "total": total, "limit": limit, "offset": offset}
 
 @app.get("/api/admin/export/csv")
 def api_admin_export_csv(request: Request):

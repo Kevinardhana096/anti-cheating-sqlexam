@@ -449,8 +449,7 @@ CREATE TABLE public.film (
     rating public.mpaa_rating DEFAULT 'G'::public.mpaa_rating,
     last_update timestamp with time zone DEFAULT now() NOT NULL,
     special_features text[],
-    fulltext tsvector NOT NULL,
-    length_hours numeric(4,2) GENERATED ALWAYS AS (round(length / 60.0, 2)) VIRTUAL
+    fulltext tsvector NOT NULL
 );
 
 
@@ -481,33 +480,6 @@ CREATE TABLE public.film_category (
 
 
 ALTER TABLE public.film_category OWNER TO postgres;
-
---
--- Name: vector; Type: EXTENSION; Schema: -; Owner: -
---
-
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
-
-
---
--- Name: EXTENSION vector; Type: COMMENT; Schema: -; Owner:
---
-
-COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access methods';
-
-
---
--- Name: film_embedding; Type: TABLE; Schema: public; Owner: postgres
---
-
-CREATE TABLE public.film_embedding (
-    film_id integer NOT NULL,
-    embedding public.vector(20) NOT NULL,
-    last_update timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
-ALTER TABLE public.film_embedding OWNER TO postgres;
 
 --
 -- Name: actor_info; Type: VIEW; Schema: public; Owner: postgres
@@ -2292,14 +2264,6 @@ ALTER TABLE ONLY public.film_category
 
 
 --
--- Name: film_embedding film_embedding_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
---
-
-ALTER TABLE ONLY public.film_embedding
-    ADD CONSTRAINT film_embedding_pkey PRIMARY KEY (film_id);
-
-
---
 -- Name: film film_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -2387,13 +2351,6 @@ CREATE INDEX idx_fk_country_id ON public.city USING btree (country_id);
 --
 
 CREATE INDEX idx_fk_film_id ON public.film_actor USING btree (film_id);
-
-
---
--- Name: film_embedding_embedding_hnsw_idx; Type: INDEX; Schema: public; Owner: postgres
---
-
-CREATE INDEX film_embedding_embedding_hnsw_idx ON public.film_embedding USING hnsw (embedding public.vector_cosine_ops);
 
 
 --
@@ -2684,13 +2641,6 @@ CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_category FOR EACH ROW E
 
 
 --
--- Name: film_embedding last_updated; Type: TRIGGER; Schema: public; Owner: postgres
---
-
-CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_embedding FOR EACH ROW EXECUTE FUNCTION public.last_updated();
-
-
---
 -- Name: inventory last_updated; Type: TRIGGER; Schema: public; Owner: postgres
 --
 
@@ -2787,14 +2737,6 @@ ALTER TABLE ONLY public.film_category
 
 ALTER TABLE ONLY public.film_category
     ADD CONSTRAINT film_category_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
-
-
---
--- Name: film_embedding film_embedding_film_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
---
-
-ALTER TABLE ONLY public.film_embedding
-    ADD CONSTRAINT film_embedding_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 --
@@ -3032,4 +2974,3 @@ GRANT ALL ON SCHEMA public TO PUBLIC;
 --
 -- PostgreSQL database dump complete
 --
-

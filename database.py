@@ -1,23 +1,16 @@
 import os
-
 import uuid
-
 import sqlite3
-
 import datetime
-
+from datetime import date, time as dt_time
+import decimal
+import json
 import re
-
 import time
-
 import zipfile
-
 import io
-
 import csv
-
 import threading
-
 from typing import Optional, Dict, Any, List, Tuple, Set
 
 import psycopg2
@@ -86,6 +79,13 @@ PG_STUDENT_USER = os.getenv("PG_STUDENT_USER", "student_role")
 
 PG_STUDENT_PASS = os.getenv("PG_STUDENT_PASS", "student123")
 
+# Exam Hint Mode: 'strict' (default for formal exams - pedagogical guidance without spilling answers)
+# or 'guided' (for informal practice/tutorials - detailed technical diffs)
+EXAM_HINT_MODE = os.getenv("EXAM_HINT_MODE", "strict").lower().strip()
+
+# Allow multiple students on shared Wi-Fi / NAT router IP address
+ALLOW_SHARED_IP = os.getenv("ALLOW_SHARED_IP", "true").lower().strip() in ("true", "1", "yes")
+
 
 
 # Multi-Database Whitelist & Metadata (pgAdmin-style selector)
@@ -149,13 +149,12 @@ def get_allowed_databases() -> List[Dict[str, Any]]:
 
 
 def get_sqlite_conn() -> sqlite3.Connection:
-
     conn = sqlite3.connect(SQLITE_DB_PATH, timeout=30.0)
-
     conn.row_factory = sqlite3.Row
-
     conn.execute("PRAGMA foreign_keys = ON;")
-
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
 
 
@@ -177,6 +176,8 @@ def init_system_db():
             name TEXT NOT NULL,
 
             ip_address TEXT,
+
+            device_id TEXT,
 
             session_token TEXT,
 
@@ -211,6 +212,8 @@ def init_system_db():
             difficulty_level TEXT DEFAULT 'Medium',
 
             expected_output_image TEXT DEFAULT '',
+
+            question_images TEXT DEFAULT '',
 
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -267,18 +270,35 @@ def init_system_db():
 
 
         CREATE TABLE IF NOT EXISTS waiting_room_messages (
-
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-
             nim TEXT NOT NULL,
-
             name TEXT NOT NULL,
-
             message TEXT NOT NULL,
-
             sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
         );
+
+        CREATE TABLE IF NOT EXISTS exam_packages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_nim ON users(nim);
+        CREATE INDEX IF NOT EXISTS idx_users_session_token ON users(session_token);
+        CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+        CREATE INDEX IF NOT EXISTS idx_questions_category ON questions(category);
+        CREATE INDEX IF NOT EXISTS idx_questions_num ON questions(question_number);
+        CREATE INDEX IF NOT EXISTS idx_questions_cat_num ON questions(category, question_number);
+        CREATE INDEX IF NOT EXISTS idx_submissions_user_id ON submissions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_submissions_question_id ON submissions(question_id);
+        CREATE INDEX IF NOT EXISTS idx_submissions_user_question ON submissions(user_id, question_id);
+        CREATE INDEX IF NOT EXISTS idx_exam_logs_user_id ON exam_logs(user_id);
+        CREATE INDEX IF NOT EXISTS idx_exam_logs_action ON exam_logs(action_type);
+        CREATE INDEX IF NOT EXISTS idx_exam_logs_timestamp ON exam_logs(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_exam_packages_code ON exam_packages(code);
 
         """)
 
@@ -320,29 +340,37 @@ def init_system_db():
 
 
 
-        # Migrations for newer columns
+        # Migrations for newer columns across tables
+        for table, col_def in [
+            ("users", "virtual_db TEXT DEFAULT NULL"),
+            ("users", "selected_category TEXT DEFAULT NULL"),
+            ("users", "device_id TEXT DEFAULT NULL"),
+            ("questions", "target_database TEXT DEFAULT 'pagila'"),
+            ("questions", "difficulty_level TEXT DEFAULT 'Medium'"),
+            ("questions", "expected_output_image TEXT DEFAULT ''"),
+            ("questions", "question_images TEXT DEFAULT ''"),
+            ("exam_packages", "description TEXT DEFAULT ''"),
+            ("exam_packages", "is_active INTEGER DEFAULT 1"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def};")
+                conn.commit()
+            except Exception:
+                pass
 
-        try:
-
-            conn.execute("ALTER TABLE users ADD COLUMN virtual_db TEXT DEFAULT NULL;")
-
+        # Seed default exam packages if empty
+        cur.execute("SELECT COUNT(*) FROM exam_packages;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("SELECT DISTINCT category FROM questions WHERE category IS NOT NULL AND category != '';")
+            cats = [r[0].strip().upper() for r in cur.fetchall() if r[0]]
+            if not cats:
+                cats = ["A", "B"]
+            for cat in sorted(set(cats)):
+                cur.execute(
+                    "INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES (?, ?, ?, 1);",
+                    (cat, f"Paket {cat}", f"Paket Soal Ujian Praktikum Basis Data {cat}")
+                )
             conn.commit()
-
-        except Exception:
-
-            pass
-
-
-
-        try:
-
-            conn.execute("ALTER TABLE users ADD COLUMN selected_category TEXT DEFAULT NULL;")
-
-            conn.commit()
-
-        except Exception:
-
-            pass
 
 
 
@@ -518,302 +546,180 @@ def seed_default_questions(conn: sqlite3.Connection):
 
 
 
-def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds: int = 90) -> bool:
-
+def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds: int = 60) -> bool:
     if status != "online" or not last_active_str:
-
         return False
-
     try:
-
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-
-        dt = datetime.datetime.fromisoformat(last_active_str.replace("Z", ""))
-
-        return (now - dt).total_seconds() < timeout_seconds
-
+        clean_str = last_active_str.replace("Z", "").split("+")[0].strip()
+        dt = datetime.datetime.fromisoformat(clean_str)
+        diff = (now - dt).total_seconds()
+        # Normal active window: last active between 0 and timeout_seconds ago
+        if 0 <= diff < timeout_seconds:
+            return True
+        # Minor clock skew / jitter tolerance (up to 5 seconds ahead)
+        elif diff < 0 and abs(diff) < 5:
+            return True
+        return False
     except Exception:
-
         return status == "online"
 
 
 
-def login_student(nim: str, name: str, ip_address: str, session_token: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-
+def login_student(nim: str, name: str, ip_address: str, session_token: str, device_id: Optional[str] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
     nim = nim.strip()
-
     name = name.strip()
-
-
+    clean_dev = (device_id or "").strip()[:64]
 
     if not nim or not name:
-
         return False, None, "NIM dan Nama Lengkap wajib diisi!"
 
-
-
     if not re.match(r'^[A-Za-z0-9_\-\.]+$', nim):
-
         return False, None, "Format NIM tidak valid. Gunakan huruf dan angka tanpa spasi."
 
-
-
     conn = get_sqlite_conn()
-
     try:
-
         cur = conn.cursor()
 
-
-
-        # 1. Anti-Joki: Pastikan satu IP tidak menjalankan lebih dari 1 mahasiswa aktif sekaligus (kecuali localhost)
-
-        if ip_address not in ("127.0.0.1", "localhost", "::1"):
-
+        # 1. Anti-Joki Perangkat:
+        # Jika client menyertakan device_id unik browser/perangkat,
+        # pastikan tidak ada mahasiswa lain yang sedang aktif di browser/perangkat yang sama.
+        if clean_dev:
             cur.execute(
-
-                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
-
-                (ip_address, nim)
-
+                "SELECT * FROM users WHERE device_id = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                (clean_dev, nim)
             )
-
-            other_active_on_ip = cur.fetchall()
-
-            for other_user in other_active_on_ip:
-
+            other_dev_users = cur.fetchall()
+            for other_user in other_dev_users:
                 if is_user_active(other_user["last_active"], other_user["status"]):
-
                     conn.execute(
-
                         """
-
                         INSERT INTO exam_logs (user_id, action_type, details)
-
                         VALUES (?, 'multi_account_blocked', ?);
-
                         """,
-
                         (
-
                             other_user["id"],
-
-                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat (IP: {ip_address}) sedang aktif untuk NIM {other_user['nim']}"
-
+                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat ({clean_dev[:8]}...) sedang aktif untuk NIM {other_user['nim']}"
                         )
-
                     )
-
                     conn.commit()
+                    return False, None, f"Perangkat/Browser ini masih memiliki sesi aktif untuk NIM {other_user['nim']}. Satu laptop/browser hanya boleh digunakan oleh satu mahasiswa!"
 
+        # Jika ALLOW_SHARED_IP dinonaktifkan (mode strict IP):
+        # Pastikan satu IP tidak menjalankan lebih dari 1 mahasiswa aktif sekaligus (kecuali localhost)
+        if not ALLOW_SHARED_IP and ip_address not in ("127.0.0.1", "localhost", "::1", "testclient"):
+            cur.execute(
+                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                (ip_address, nim)
+            )
+            other_active_on_ip = cur.fetchall()
+            for other_user in other_active_on_ip:
+                if is_user_active(other_user["last_active"], other_user["status"]):
+                    conn.execute(
+                        """
+                        INSERT INTO exam_logs (user_id, action_type, details)
+                        VALUES (?, 'multi_account_blocked', ?);
+                        """,
+                        (
+                            other_user["id"],
+                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat (IP: {ip_address}) sedang aktif untuk NIM {other_user['nim']}"
+                        )
+                    )
+                    conn.commit()
                     return False, None, f"Perangkat ini (IP: {ip_address}) masih memiliki sesi aktif untuk NIM {other_user['nim']}. Satu perangkat hanya boleh digunakan oleh satu mahasiswa!"
 
-
-
         # 2. Cek apakah NIM ini sudah terdaftar sebelumnya
-
         cur.execute("SELECT * FROM users WHERE LOWER(nim) = LOWER(?);", (nim,))
-
         existing_user = cur.fetchone()
 
-
-
         if existing_user:
-
             user_id = existing_user["id"]
-
             reg_nim = existing_user["nim"]
-
             reg_name = existing_user["name"]
-
             old_ip = existing_user["ip_address"]
-
+            old_dev = existing_user["device_id"] if "device_id" in existing_user.keys() else None
             user_status = existing_user["status"]
-
             last_active = existing_user["last_active"]
 
-
-
             # 2a. Verifikasi Nama (Mencegah mahasiswa login dengan NIM orang lain)
-
             if reg_name.strip().lower() != name.lower():
-
                 conn.execute(
-
                     """
-
                     INSERT INTO exam_logs (user_id, action_type, details)
-
                     VALUES (?, 'nim_hijack_attempt', ?);
-
                     """,
-
                     (
-
                         user_id,
-
                         f"Percobaan login NIM {reg_nim} ditolak: Nama '{name}' tidak cocok dengan nama terdaftar '{reg_name}' (IP: {ip_address})"
-
                     )
-
                 )
-
                 conn.commit()
-
                 return False, None, f"NIM {reg_nim} sudah terdaftar atas nama '{reg_name}'. Nama yang Anda masukkan tidak cocok. Pastikan Anda tidak menggunakan NIM mahasiswa lain!"
 
-
-
             # 2b. Enforce Unique Active NIM: Cek apakah NIM sedang aktif di sesi ujian
-
             active = is_user_active(last_active, user_status)
+            is_same_device = (clean_dev and old_dev and clean_dev == old_dev) or (old_ip == ip_address)
 
-            if active:
-
-                # Jika login dari perangkat/IP yang sama persis: izinkan melanjutkan sesi (misal refresh/tab tertutup)
-
-                if old_ip == ip_address:
-
-                    conn.execute(
-
-                        """
-
-                        UPDATE users
-
-                        SET session_token = ?, status = 'online', last_active = CURRENT_TIMESTAMP
-
-                        WHERE id = ?;
-
-                        """,
-
-                        (session_token, user_id)
-
-                    )
-
-                    conn.execute(
-
-                        """
-
-                        INSERT INTO exam_logs (user_id, action_type, details)
-
-                        VALUES (?, 'resume_session', ?);
-
-                        """,
-
-                        (user_id, f"Mahasiswa {reg_nim} melanjutkan sesi pada IP {ip_address}")
-
-                    )
-
-                else:
-
-                    # Perangkat/IP LAIN mencoba login dengan NIM yang SEDANG AKTIF!
-
-                    # TOLAK login ini untuk melindungi mahasiswa yang sah yang sedang ujian
-
-                    conn.execute(
-
-                        """
-
-                        INSERT INTO exam_logs (user_id, action_type, details)
-
-                        VALUES (?, 'duplicate_nim_blocked', ?);
-
-                        """,
-
-                        (
-
-                            user_id,
-
-                            f"Percobaan login ganda NIM {reg_nim} dari IP {ip_address} DITOLAK karena sedang aktif di IP {old_ip}"
-
-                        )
-
-                    )
-
-                    conn.commit()
-
-                    return False, None, f"NIM {reg_nim} sedang aktif digunakan dalam sesi ujian pada perangkat lain (IP: {old_ip}). Setiap mahasiswa hanya dapat aktif pada 1 sesi ujian dengan NIM unik. Hubungi pengawas jika Anda perlu reset sesi."
-
-
-
-            else:
-
-                # 2c. Mahasiswa offline / direset pengawas / timeout: Izinkan login ulang dengan data yang cocok
-
+            if active and not is_same_device:
+                # Perangkat/IP LAIN mencoba login dengan NIM yang SEDANG AKTIF!
                 conn.execute(
-
                     """
-
-                    UPDATE users
-
-                    SET ip_address = ?, session_token = ?, status = 'online', last_active = CURRENT_TIMESTAMP
-
-                    WHERE id = ?;
-
-                    """,
-
-                    (ip_address, session_token, user_id)
-
-                )
-
-                conn.execute(
-
-                    """
-
                     INSERT INTO exam_logs (user_id, action_type, details)
-
-                    VALUES (?, 'login', ?);
-
+                    VALUES (?, 'duplicate_nim_blocked', ?);
                     """,
-
-                    (user_id, f"Mahasiswa {reg_nim} login kembali dari IP {ip_address}")
-
+                    (
+                        user_id,
+                        f"Percobaan login ganda NIM {reg_nim} dari IP {ip_address} (dev: {clean_dev[:8] if clean_dev else 'none'}) DITOLAK karena sedang aktif di IP {old_ip}"
+                    )
                 )
+                conn.commit()
+                return False, None, f"NIM {reg_nim} sedang aktif digunakan dalam sesi ujian pada perangkat lain (IP: {old_ip}). Setiap mahasiswa hanya dapat aktif pada 1 sesi ujian dengan NIM unik. Minta pengawas untuk 'Bebaskan Sesi' jika perangkat Anda bermasalah."
 
+            # Sesi diizinkan (melanjutkan sesi aktif di perangkat sama, atau login ulang setelah offline/timeout/reset pengawas)
+            action_type = 'resume_session' if active else 'login'
+            action_desc = f"Mahasiswa {reg_nim} melanjutkan sesi pada IP {ip_address}" if active else f"Mahasiswa {reg_nim} login kembali dari IP {ip_address}"
 
+            conn.execute(
+                """
+                UPDATE users
+                SET ip_address = ?,
+                    device_id = COALESCE(?, device_id),
+                    session_token = ?,
+                    status = 'online',
+                    last_active = CURRENT_TIMESTAMP
+                WHERE id = ?;
+                """,
+                (ip_address, clean_dev or None, session_token, user_id)
+            )
+            conn.execute(
+                """
+                INSERT INTO exam_logs (user_id, action_type, details)
+                VALUES (?, ?, ?);
+                """,
+                (user_id, action_type, action_desc)
+            )
 
         else:
-
             # 3. Registrasi Mahasiswa Baru dengan NIM unik
-
             cur.execute(
-
                 """
-
-                INSERT INTO users (nim, name, ip_address, session_token, status, last_active)
-
-                VALUES (?, ?, ?, ?, 'online', CURRENT_TIMESTAMP);
-
+                INSERT INTO users (nim, name, ip_address, device_id, session_token, status, last_active)
+                VALUES (?, ?, ?, ?, ?, 'online', CURRENT_TIMESTAMP);
                 """,
-
-                (nim, name, ip_address, session_token)
-
+                (nim, name, ip_address, clean_dev or None, session_token)
             )
-
             user_id = cur.lastrowid
-
             cur.execute(
-
                 """
-
                 INSERT INTO exam_logs (user_id, action_type, details)
-
                 VALUES (?, 'login', ?);
-
                 """,
-
                 (user_id, f"Registrasi awal dan login NIM {nim} ({name}) dari IP {ip_address}")
-
             )
-
-
 
         conn.commit()
-
         cur.execute("SELECT * FROM users WHERE id = ?;", (user_id,))
-
         user_row = dict(cur.fetchone())
-
         return True, user_row, None
 
 
@@ -898,7 +804,7 @@ def update_student_heartbeat(user_id: int):
 
             """
 
-            UPDATE users 
+            UPDATE users
 
             SET last_active = CURRENT_TIMESTAMP, status = 'online'
 
@@ -944,94 +850,80 @@ def logout_student(nim: str, session_token: str):
 
 
 
-def kick_student(nim: str) -> bool:
+def clear_student_session_lock(nim: str) -> Tuple[bool, str]:
+    """Membebaskan kunci sesi perangkat & status online untuk NIM tertentu tanpa menghapus submisi."""
+    clean_nim = (nim or "").strip()
+    if not clean_nim:
+        return False, "NIM tidak boleh kosong."
 
     conn = get_sqlite_conn()
-
-    with conn:
-
+    try:
         cur = conn.cursor()
+        cur.execute("SELECT id, name FROM users WHERE LOWER(nim) = LOWER(?);", (clean_nim,))
+        user = cur.fetchone()
+        if not user:
+            return False, f"Mahasiswa dengan NIM '{clean_nim}' tidak ditemukan."
+
+        user_id = user["id"]
+        user_name = user["name"]
 
         cur.execute(
-
             """
-
-            UPDATE users 
-
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline' 
-
-            WHERE LOWER(nim) = LOWER(?);
-
+            UPDATE users
+            SET status = 'offline',
+                session_token = NULL,
+                device_id = NULL,
+                last_active = datetime('now', '-120 seconds')
+            WHERE id = ?;
             """,
-
-            (nim,)
-
+            (user_id,)
         )
-
         cur.execute(
-
             """
-
-            INSERT INTO exam_logs (action_type, details)
-
-            VALUES ('kick', ?);
-
+            INSERT INTO exam_logs (user_id, action_type, details)
+            VALUES (?, 'clear_session_lock', ?);
             """,
-
-            (f"Pengawas me-reset sesi untuk NIM {nim}",)
-
+            (user_id, f"Pengawas membebaskan kunci sesi NIM {clean_nim} ({user_name}). Jawaban mahasiswa tetap tersimpan.")
         )
+        conn.commit()
+        return True, f"Kunci sesi untuk NIM {clean_nim} ({user_name}) berhasil dibebaskan. Mahasiswa dapat langsung login kembali tanpa kehilangan data jawaban."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Gagal membebaskan kunci sesi: {str(e)}"
+    finally:
+        conn.close()
 
-    conn.close()
 
-    return True
-
+def kick_student(nim: str) -> bool:
+    success, _ = clear_student_session_lock(nim)
+    return success
 
 
 def stop_all_active_sessions() -> int:
-
-    """Hentikan semua sesi mahasiswa yang sedang berlangsung sekaligus."""
-
+    """Hentikan semua sesi mahasiswa yang sedang berlangsung sekaligus dan bebaskan semua kunci sesi."""
     conn = get_sqlite_conn()
-
     with conn:
-
         cur = conn.cursor()
-
         cur.execute(
-
             """
-
-            UPDATE users 
-
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline'
-
+            UPDATE users
+            SET session_token = 'KICKED_BY_ADMIN',
+                device_id = NULL,
+                status = 'offline',
+                last_active = datetime('now', '-120 seconds')
             WHERE status = 'online' OR (session_token IS NOT NULL AND session_token != 'KICKED_BY_ADMIN');
-
             """
-
         )
-
         count = cur.rowcount
-
         cur.execute(
-
             """
-
             INSERT INTO exam_logs (action_type, details)
-
             VALUES ('stop_all_sessions', ?);
-
             """,
-
-            (f"Pengawas menghentikan semua sesi ujian aktif ({count} sesi dinonaktifkan)",)
-
+            (f"Pengawas menghentikan dan membebaskan semua sesi ({count} mahasiswa di-logout)",)
         )
-
     conn.close()
-
     return count
-
 
 
 def clear_exam_logs() -> int:
@@ -1138,7 +1030,40 @@ def clear_previous_sessions(clear_logs: bool = False) -> Dict[str, int]:
 
 # ------------------------------------------------------------------------------
 
+def parse_image_urls(val: Any) -> List[str]:
+    """Parse string, JSON list, or list into a clean list of image URL strings."""
+    if not val:
+        return []
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    if isinstance(val, str):
+        val_str = val.strip()
+        if not val_str:
+            return []
+        if val_str.startswith("[") and val_str.endswith("]"):
+            try:
+                parsed = json.loads(val_str)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                pass
+        return [p.strip() for p in re.split(r'[\r\n,]+', val_str) if p.strip()]
+    return []
 
+def _enrich_question_dict(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize and enrich question dictionary with multi-image lists."""
+    # Question diagrams / images
+    q_imgs_raw = item.get("question_images", "")
+    q_imgs_list = parse_image_urls(q_imgs_raw)
+    item["question_images_list"] = q_imgs_list
+    item["question_images"] = json.dumps(q_imgs_list) if q_imgs_list else ""
+
+    # Expected output table screenshots
+    exp_raw = item.get("expected_output_image", "")
+    exp_list = parse_image_urls(exp_raw)
+    item["expected_output_images"] = exp_list
+    item["expected_output_image"] = exp_list[0] if exp_list else (exp_raw if isinstance(exp_raw, str) else "")
+    return item
 
 def get_all_questions(include_expected_query: bool = False, category: Optional[str] = None) -> List[Dict[str, Any]]:
 
@@ -1170,7 +1095,7 @@ def get_all_questions(include_expected_query: bool = False, category: Optional[s
 
             item.pop("expected_query", None)
 
-        result.append(item)
+        result.append(_enrich_question_dict(item))
 
     return result
 
@@ -1204,7 +1129,7 @@ def get_questions_by_category(category: str, include_expected_query: bool = Fals
 
             item.pop("expected_query", None)
 
-        result.append(item)
+        result.append(_enrich_question_dict(item))
 
     return result
 
@@ -1272,13 +1197,13 @@ def get_all_packages(include_inactive: bool = True) -> List[Dict[str, Any]]:
 
     rows = cur.fetchall()
 
-    
+
 
     cur.execute("SELECT category, COUNT(*), SUM(score_weight) FROM questions GROUP BY category;")
 
     q_stats = {r[0]: {"count": r[1], "total_score": r[2] or 0} for r in cur.fetchall()}
 
-    
+
 
     cur.execute("SELECT selected_category, COUNT(*) FROM users WHERE selected_category IS NOT NULL AND selected_category != '' GROUP BY selected_category;")
 
@@ -1286,7 +1211,7 @@ def get_all_packages(include_inactive: bool = True) -> List[Dict[str, Any]]:
 
     conn.close()
 
-    
+
 
     pkgs = []
 
@@ -1549,6 +1474,51 @@ def reset_student_category(nim: str) -> Tuple[bool, str]:
     return True, f"Pilihan paket untuk NIM {clean_nim} berhasil di-reset."
 
 
+def reset_student_by_nim(nim: str) -> Dict[str, Any]:
+    """Mereset data sesi mahasiswa individual berdasarkan NIM."""
+    clean_nim = (nim or "").strip()
+    if not clean_nim:
+        return {"success": False, "message": "NIM tidak boleh kosong."}
+
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM users WHERE LOWER(nim) = LOWER(?);", (clean_nim,))
+    user = cur.fetchone()
+
+    if not user:
+        conn.close()
+        return {"success": False, "message": f"Mahasiswa dengan NIM '{clean_nim}' tidak ditemukan."}
+
+    user_id = user["id"]
+    user_name = user["name"]
+
+    cur.execute("SELECT COUNT(*) FROM submissions WHERE user_id = ?;", (user_id,))
+    sub_count = cur.fetchone()[0]
+
+    cur.execute("DELETE FROM submissions WHERE user_id = ?;", (user_id,))
+    cur.execute("DELETE FROM users WHERE id = ?;", (user_id,))
+
+    cur.execute(
+        """
+        INSERT INTO exam_logs (action_type, details)
+        VALUES ('reset_student', ?);
+        """,
+        (f"Pengawas / CLI mereset data sesi dan submisi untuk NIM {clean_nim} ({user_name}).",)
+    )
+    conn.commit()
+    conn.close()
+
+    schema_dropped = cleanup_student_sandbox_schema(clean_nim)
+
+    return {
+        "success": True,
+        "nim": clean_nim,
+        "name": user_name,
+        "submissions_cleared": sub_count,
+        "schema_dropped": schema_dropped
+    }
+
+
 
 
 
@@ -1575,8 +1545,8 @@ def get_student_virtual_database(nim: Optional[str]) -> Optional[str]:
         conn_pg = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
         cur_pg = conn_pg.cursor()
         cur_pg.execute("""
-            SELECT description FROM pg_description 
-            JOIN pg_namespace ON pg_description.objoid = pg_namespace.oid 
+            SELECT description FROM pg_description
+            JOIN pg_namespace ON pg_description.objoid = pg_namespace.oid
             WHERE pg_namespace.nspname = %s;
         """, (schema_name,))
         desc_row = cur_pg.fetchone()
@@ -1637,7 +1607,7 @@ def get_question_by_id(question_id: int) -> Optional[Dict[str, Any]]:
 
     conn.close()
 
-    return dict(row) if row else None
+    return _enrich_question_dict(dict(row)) if row else None
 
 
 
@@ -1661,7 +1631,9 @@ def save_question(
 
     difficulty_level: str = "Medium",
 
-    expected_output_image: str = ""
+    expected_output_image: Any = "",
+
+    question_images: Any = ""
 
 ) -> int:
 
@@ -1670,6 +1642,12 @@ def save_question(
     with conn:
 
         cur = conn.cursor()
+
+        exp_list = parse_image_urls(expected_output_image)
+        exp_val = json.dumps(exp_list) if len(exp_list) > 1 else (exp_list[0] if exp_list else "")
+
+        q_img_list = parse_image_urls(question_images)
+        q_img_val = json.dumps(q_img_list) if len(q_img_list) > 1 else (q_img_list[0] if q_img_list else "")
 
         if question_id:
 
@@ -1681,13 +1659,13 @@ def save_question(
 
                 SET question_number = ?, title = ?, description = ?, score_weight = ?, expected_query = ?,
 
-                    category = ?, target_database = ?, difficulty_level = ?, expected_output_image = ?
+                    category = ?, target_database = ?, difficulty_level = ?, expected_output_image = ?, question_images = ?
 
                 WHERE id = ?;
 
                 """,
 
-                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, expected_output_image, question_id)
+                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, exp_val, q_img_val, question_id)
 
             )
 
@@ -1699,13 +1677,13 @@ def save_question(
 
                 """
 
-                INSERT INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, expected_output_image)
+                INSERT INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, expected_output_image, question_images)
 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
                 """,
 
-                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, expected_output_image)
+                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, exp_val, q_img_val)
 
             )
 
@@ -1778,117 +1756,104 @@ def extract_table_name_from_dml(dml_sql: str) -> Optional[str]:
     return match.group(1).lower() if match else None
 
 
+def extract_all_table_names_from_dml(dml_sql: str) -> List[str]:
+    """
+    Extracts all table names from one or multiple INSERT INTO statements.
+    Preserves declaration order and filters duplicates.
+    """
+    if not dml_sql:
+        return []
+    matches = re.findall(
+        r'INSERT\s+INTO\s+(?:[`"]?[a-zA-Z0-9_]+[`"]?\.)?[`"]?([a-zA-Z0-9_]+)[`"]?',
+        dml_sql,
+        re.IGNORECASE
+    )
+    seen = set()
+    result = []
+    for m in matches:
+        m_clean = m.strip().lower()
+        if m_clean not in seen:
+            seen.add(m_clean)
+            result.append(m.strip())
+    return result
+
 
 def compile_reference_dml(
-
     expected_dml_sql: str,
-
-    table_name: str,
-
+    table_name: Any,
     student_schema: str,
-
     dbname: str = DEFAULT_EXAM_DB
-
 ) -> Dict[str, Any]:
-
     """
-
     Compiles the lecturer's expected DML (INSERT INTO) query inside an isolated temporary schema.
-
-    Clones the table structure from the student's sandbox schema, executes expected DML,
-
-    extracts the reference rows and columns, and cleanly drops the temporary schema.
-
+    Clones all specified table structures from the student's sandbox schema, executes expected DML,
+    extracts the reference rows and columns for each table, and cleanly drops the temporary schema.
     Guarantees ZERO schema leaks.
-
     """
+    if isinstance(table_name, str):
+        table_names = [table_name]
+    elif isinstance(table_name, (list, tuple)):
+        table_names = list(table_name)
+    else:
+        table_names = extract_all_table_names_from_dml(expected_dml_sql)
 
     temp_schema = f"_ref_dml_{uuid.uuid4().hex[:12]}"
-
     conn = get_pg_admin_connection(dbname=dbname)
-
     conn.autocommit = True
-
     cur = conn.cursor()
 
-
-
     try:
-
         cur.execute(f"CREATE SCHEMA {temp_schema};")
-
-        cur.execute(sql.SQL("CREATE TABLE {}.{} (LIKE {}.{} INCLUDING ALL);").format(
-
-            sql.Identifier(temp_schema),
-
-            sql.Identifier(table_name),
-
-            sql.Identifier(student_schema),
-
-            sql.Identifier(table_name)
-
-        ))
-
+        for t in table_names:
+            cur.execute(sql.SQL("CREATE TABLE {}.{} (LIKE {}.{} INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES);").format(
+                sql.Identifier(temp_schema),
+                sql.Identifier(t),
+                sql.Identifier(student_schema),
+                sql.Identifier(t)
+            ))
         cur.execute(f"SET search_path TO {temp_schema}, public;")
-
         cur.execute(expected_dml_sql)
 
-        
+        tables_data = {}
+        for t in table_names:
+            cur.execute(sql.SQL("SELECT * FROM {}.{};").format(
+                sql.Identifier(temp_schema),
+                sql.Identifier(t)
+            ))
+            cols = [desc[0] for desc in cur.description] if cur.description else []
+            rows = cur.fetchall()
+            tables_data[t.lower()] = {
+                "columns": cols,
+                "rows": rows,
+                "row_count": len(rows)
+            }
 
-        cur.execute(sql.SQL("SELECT * FROM {}.{};").format(
-
-            sql.Identifier(temp_schema),
-
-            sql.Identifier(table_name)
-
-        ))
-
-        columns = [desc[0] for desc in cur.description] if cur.description else []
-
-        rows = cur.fetchall()
-
-        
+        first_tbl = table_names[0].lower() if table_names else ""
+        first_cols = tables_data[first_tbl]["columns"] if first_tbl in tables_data else []
+        first_rows = tables_data[first_tbl]["rows"] if first_tbl in tables_data else []
 
         return {
-
             "success": True,
-
-            "columns": columns,
-
-            "rows": rows,
-
-            "row_count": len(rows)
-
+            "tables": tables_data,
+            "columns": first_cols,
+            "rows": first_rows,
+            "row_count": len(first_rows)
         }
-
     except Exception as e:
-
         return {
-
             "success": False,
-
             "error": f"Gagal mengeksekusi kunci acuan DML dosen: {str(e)}",
-
+            "tables": {},
             "columns": [],
-
             "rows": [],
-
             "row_count": 0
-
         }
-
     finally:
-
         try:
-
             cur.execute(f"DROP SCHEMA IF EXISTS {temp_schema} CASCADE;")
-
         except Exception:
-
             pass
-
         cur.close()
-
         conn.close()
 
 
@@ -1946,11 +1911,11 @@ def compare_table_records(
 
 
     if len(stud_rows) != len(ref_rows):
-
         details["status"] = "row_count_mismatch"
-
-        msg = f"Jumlah baris data pada tabel '{table_name}' tidak sesuai. Diharapkan {len(ref_rows)} baris data, namun tabel Anda memiliki {len(stud_rows)} baris data."
-
+        if EXAM_HINT_MODE == "guided":
+            msg = f"Jumlah baris data pada tabel '{table_name}' ({len(stud_rows)} baris) belum sesuai. Periksa kembali jumlah data yang dimasukkan (diharapkan {len(ref_rows)} baris)."
+        else:
+            msg = f"Kuantitas baris data pada tabel '{table_name}' belum sesuai. Periksa kembali seluruh data registrasi mentah yang diminta untuk dimasukkan."
         return False, msg, details
 
 
@@ -2029,15 +1994,15 @@ def compare_table_records(
 
         details["unmatched_reference"] = unmatched_ref
 
-        
 
-        msg = f"Data yang tersimpan di tabel '{table_name}' belum sesuai dengan kunci acuan dosen. Periksa kembali keakuratan nilai kolom (angka, teks, atau format tanggal) yang Anda masukkan."
+
+        msg = f"Data yang tersimpan di tabel '{table_name}' belum sesuai. Periksa kembali keakuratan nilai setiap kolom (angka, teks, atau format tanggal) yang Anda masukkan."
 
         return False, msg, details
 
 
 
-    msg = f"Sempurna! Seluruh {len(stud_rows)} baris data pada tabel '{table_name}' berhasil dimasukkan dan nilainya 100% cocok dengan acuan dosen."
+    msg = f"Sempurna! Seluruh {len(stud_rows)} baris data pada tabel '{table_name}' berhasil dimasukkan dan nilainya valid."
 
     return True, msg, details
 
@@ -2209,7 +2174,7 @@ def evaluate_sql_submission(
 
                 "eval_status": "wrong_data",
 
-                "feedback": f"Kueri Anda belum memuat perintah CREATE DATABASE sesuai instruksi soal. Kunci acuan mengharapkan pembuatan database '{exp_db}'.",
+                "feedback": "Kueri Anda belum memuat perintah CREATE DATABASE sesuai instruksi soal. Pastikan Anda membuat database dengan nama yang diminta.",
 
                 "student_result": None
 
@@ -2227,7 +2192,7 @@ def evaluate_sql_submission(
 
                 "eval_status": "wrong_database_name",
 
-                "feedback": f"Nama database belum sesuai. Kunci acuan mengharapkan database '{exp_db}', namun Anda membuat '{stud_db}'.",
+                "feedback": f"Nama database '{stud_db}' belum sesuai dengan instruksi soal. Periksa kembali penamaan database Anda.",
 
                 "student_result": None
 
@@ -2339,7 +2304,7 @@ def evaluate_sql_submission(
 
                     "eval_status": "wrong_data",
 
-                    "feedback": f"Kueri Anda belum memuat perintah DROP DATABASE. Kunci acuan mengharapkan penghapusan database '{exp_db}'.",
+                    "feedback": "Kueri Anda belum memuat perintah DROP DATABASE sesuai instruksi soal.",
 
                     "student_result": None
 
@@ -2357,7 +2322,7 @@ def evaluate_sql_submission(
 
                     "eval_status": "wrong_database_name",
 
-                    "feedback": f"Nama database yang dihapus belum sesuai. Kunci acuan mengharapkan penghapusan '{exp_db}', namun Anda menghapus '{stud_db}'.",
+                    "feedback": f"Nama database '{stud_db}' yang dihapus belum sesuai dengan instruksi soal. Periksa kembali nama database target.",
 
                     "student_result": None
 
@@ -2401,616 +2366,466 @@ def evaluate_sql_submission(
 
 
 
-    # 4. Handle DDL (CREATE TABLE) with Deep Catalog & Structure Inspection (Fase 2)
+    # 4. Handle DDL (CREATE TABLE) with Deep Catalog & Multi-Table Structure Inspection (Fase 2)
+    exp_tables = extract_all_table_names_from_ddl(expected_query or "")
+    exp_dml_tables = extract_all_table_names_from_dml(expected_query or "")
+    has_exp_ddl = bool(exp_tables)
+    has_exp_dml = bool(exp_dml_tables)
+    has_exp_select = bool(re.search(r'\bSELECT\b', expected_query or "", re.IGNORECASE))
 
-    ddl_tbl = extract_table_name_from_ddl(submitted_query)
-
-    if ("CREATE TABLE" in clean_q_upper) and (not clean_q_upper.startswith("INSERT INTO")):
-
-        tbl_name = ddl_tbl
-
-        if not tbl_name:
-
+    is_ddl_question = bool(has_exp_ddl and not has_exp_dml and not has_exp_select)
+    if is_ddl_question or ("CREATE TABLE" in clean_q_upper):
+        if is_ddl_question and not ("CREATE TABLE" in clean_q_upper):
+            fb_tbl = (
+                f"Kueri Anda belum memuat perintah CREATE TABLE untuk membuat tabel ({', '.join(exp_tables)}) sesuai instruksi soal."
+                if EXAM_HINT_MODE == "guided"
+                else "Kueri Anda belum memuat perintah CREATE TABLE untuk seluruh tabel yang diminta pada instruksi soal."
+            )
             return {
-
                 "is_correct": False,
-
                 "score": 0,
-
-                "eval_status": "syntax_error",
-
-                "feedback": "Sintaks CREATE TABLE tidak valid: nama tabel tidak dapat diidentifikasi.",
-
+                "eval_status": "missing_table",
+                "feedback": fb_tbl,
                 "student_result": None
-
             }
 
-
+        # For DDL evaluation in sandbox, drop existing target tables first so fresh query can execute cleanly
+        if is_sandbox:
+            target_drop_tables = exp_tables if exp_tables else extract_all_table_names_from_ddl(submitted_query)
+            if target_drop_tables:
+                student_schema = get_clean_student_schema_name(nim)
+                try:
+                    conn_clean = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
+                    conn_clean.autocommit = True
+                    cur_clean = conn_clean.cursor()
+                    for t in reversed(target_drop_tables):
+                        cur_clean.execute(sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE;").format(sql.Identifier(student_schema), sql.Identifier(t)))
+                    cur_clean.close()
+                    conn_clean.close()
+                except Exception as e:
+                    print(f"Warning dropping student sandbox tables before DDL eval: {e}")
 
         # Execute in student's sandbox
-
         stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
 
-        
-
         # If execution failed with syntax error other than 'already exists'
-
         if not stud_res.get("success"):
-
             err_msg = stud_res.get("error", "")
-
             if "already exists" not in err_msg.lower():
-
                 return {
-
                     "is_correct": False,
-
                     "score": 0,
-
                     "eval_status": "syntax_error",
-
                     "feedback": f"Error Sintaks SQL: {err_msg}",
-
                     "student_result": stud_res
-
                 }
-
-
 
         # Now perform Deep PostgreSQL Catalog Inspection against Lecturer's Expected DDL
-
         student_schema = get_clean_student_schema_name(nim)
 
-        
-
-        if expected_query and extract_table_name_from_ddl(expected_query):
-
-            # Compile reference DDL to get expected metadata
-
-            ref_meta = compile_reference_ddl(expected_query, dbname=DEFAULT_EXAM_DB)
-
-            if not ref_meta.get("exists"):
-
-                # Fallback if reference DDL has issue
-
-                ref_err = ref_meta.get("error", "Kunci acuan dosen tidak valid.")
-
+        if exp_tables:
+            # Compile reference DDL to get expected metadata for ALL tables
+            all_ref_meta = compile_all_reference_ddls(expected_query, dbname=DEFAULT_EXAM_DB)
+            if "_error" in all_ref_meta:
                 return {
-
                     "is_correct": False,
-
                     "score": 0,
-
                     "eval_status": "reference_error",
-
-                    "feedback": f"Peringatan Evaluator: {ref_err}",
-
+                    "feedback": f"Peringatan Evaluator: {all_ref_meta['_error']}",
                     "student_result": stud_res
-
                 }
-
-            
-
-            # Inspect student's table catalog
 
             stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
+            diagnostics = {}
             try:
+                for exp_t in exp_tables:
+                    ref_meta = all_ref_meta.get(exp_t.lower())
+                    if not ref_meta or not ref_meta.get("exists"):
+                        continue
 
-                stud_meta = inspect_table_catalog(student_schema, tbl_name, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
+                    stud_meta = inspect_table_catalog(student_schema, exp_t, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
+                    diagnostics[exp_t] = stud_meta
 
+                    if not stud_meta.get("exists", False):
+                        if len(exp_tables) > 1:
+                            msg = f"Kueri Anda belum lengkap. Dari {len(exp_tables)} tabel yang diminta ({', '.join(exp_tables)}), tabel '{exp_t}' belum dibuat di skema database pribadi Anda."
+                        else:
+                            msg = f"Tabel '{exp_t}' belum ditemukan di skema database pribadi Anda. Pastikan perintah CREATE TABLE berhasil dijalankan."
+                        return {
+                            "is_correct": False,
+                            "score": 0,
+                            "eval_status": "missing_table",
+                            "feedback": msg,
+                            "student_result": stud_res,
+                            "diagnostics": diagnostics
+                        }
+
+                    is_valid, comp_msg, details = compare_table_structures(ref_meta, stud_meta)
+                    if not is_valid:
+                        return {
+                            "is_correct": False,
+                            "score": 0,
+                            "eval_status": "wrong_schema",
+                            "feedback": comp_msg,
+                            "student_result": stud_res,
+                            "diagnostics": details
+                        }
             finally:
-
                 if stud_conn and not stud_conn.closed:
-
                     stud_conn.close()
 
-
-
-            # Deep structure comparison
-
-            is_valid, comp_msg, details = compare_table_structures(ref_meta, stud_meta)
-
-            if is_valid:
-
-                return {
-
-                    "is_correct": True,
-
-                    "score": int(score_weight),
-
-                    "eval_status": "correct",
-
-                    "feedback": f"Sempurna! Struktur tabel '{tbl_name}' (kolom, tipe data, NOT NULL, dan PRIMARY KEY) 100% valid sesuai spesifikasi acuan dosen (+{score_weight} Poin).",
-
-                    "student_result": stud_res,
-
-                    "diagnostics": details
-
-                }
-
+            if len(exp_tables) > 1:
+                tbl_list_str = ", ".join(exp_tables)
+                feedback_msg = f"Sempurna! Seluruh {len(exp_tables)} tabel ({tbl_list_str}) beserta kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY 100% valid sesuai spesifikasi (+{score_weight} Poin)."
             else:
+                feedback_msg = f"Sempurna! Struktur tabel '{exp_tables[0]}' (kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY) 100% valid sesuai spesifikasi (+{score_weight} Poin)."
 
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "wrong_schema",
-
-                    "feedback": comp_msg,
-
-                    "student_result": stud_res,
-
-                    "diagnostics": details
-
-                }
-
+            return {
+                "is_correct": True,
+                "score": int(score_weight),
+                "eval_status": "correct",
+                "feedback": feedback_msg,
+                "student_result": stud_res,
+                "diagnostics": diagnostics
+            }
         else:
-
             # Fallback if expected_query is not provided: verify table exists in student schema
+            submitted_tables = extract_all_table_names_from_ddl(submitted_query)
+            if not submitted_tables:
+                return {
+                    "is_correct": False,
+                    "score": 0,
+                    "eval_status": "syntax_error",
+                    "feedback": "Sintaks CREATE TABLE tidak valid: nama tabel tidak dapat diidentifikasi.",
+                    "student_result": None
+                }
 
             stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
             try:
-
-                stud_meta = inspect_table_catalog(student_schema, tbl_name, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
-
+                for tbl in submitted_tables:
+                    stud_meta = inspect_table_catalog(student_schema, tbl, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
+                    if not stud_meta.get("exists"):
+                        return {
+                            "is_correct": False,
+                            "score": 0,
+                            "eval_status": "table_not_found",
+                            "feedback": f"Tabel '{tbl}' belum berhasil dibuat di skema pribadi Anda.",
+                            "student_result": stud_res
+                        }
             finally:
-
                 if stud_conn and not stud_conn.closed:
-
                     stud_conn.close()
 
-
-
-            if stud_meta.get("exists"):
-
-                return {
-
-                    "is_correct": True,
-
-                    "score": int(score_weight),
-
-                    "eval_status": "correct",
-
-                    "feedback": f"Tabel '{tbl_name}' berhasil dibuat di skema pribadi Anda (+{score_weight} Poin).",
-
-                    "student_result": stud_res
-
-                }
-
-            else:
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "table_not_found",
-
-                    "feedback": f"Tabel '{tbl_name}' belum berhasil dibuat di skema pribadi Anda.",
-
-                    "student_result": stud_res
-
-                }
+            return {
+                "is_correct": True,
+                "score": int(score_weight),
+                "eval_status": "correct",
+                "feedback": f"Tabel ({', '.join(submitted_tables)}) berhasil dibuat di skema pribadi Anda (+{score_weight} Poin).",
+                "student_result": stud_res
+            }
 
 
 
     # 5. Handle DML (INSERT INTO) with Deep Row Count & Value Inspection (Fase 3)
+    stud_dml_tables = extract_all_table_names_from_dml(submitted_query or "")
+    target_dml_tables = exp_dml_tables if exp_dml_tables else stud_dml_tables
 
-    dml_tbl = extract_table_name_from_dml(submitted_query) or (extract_table_name_from_dml(expected_query) if expected_query else None)
-
-    if ("INSERT INTO" in clean_q_upper) or (expected_query and "INSERT INTO" in expected_query.upper() and ("SELECT" not in clean_q_upper and "CREATE TABLE" not in clean_q_upper)):
-
-        tbl_name = dml_tbl
-
-
-
-        if not tbl_name:
-
+    is_dml_question = bool(has_exp_dml and not has_exp_select)
+    if is_dml_question or ("INSERT INTO" in clean_q_upper):
+        if is_dml_question and not ("INSERT INTO" in clean_q_upper):
+            fb_dml = (
+                f"Kueri Anda belum memuat perintah INSERT INTO untuk memasukkan data ke tabel ({', '.join(exp_dml_tables)}) sesuai instruksi soal."
+                if EXAM_HINT_MODE == "guided"
+                else "Kueri Anda belum memuat perintah INSERT INTO untuk seluruh tabel yang diminta pada instruksi soal."
+            )
             return {
-
                 "is_correct": False,
-
                 "score": 0,
-
-                "eval_status": "syntax_error",
-
-                "feedback": "Sintaks INSERT INTO tidak valid: nama tabel target tidak dapat diidentifikasi.",
-
+                "eval_status": "missing_dml",
+                "feedback": fb_dml,
                 "student_result": None
-
             }
 
-
+        if not target_dml_tables:
+            return {
+                "is_correct": False,
+                "score": 0,
+                "eval_status": "syntax_error",
+                "feedback": "Sintaks INSERT INTO tidak valid: nama tabel target tidak dapat diidentifikasi.",
+                "student_result": None
+            }
 
         student_schema = get_clean_student_schema_name(nim)
 
-        
-
-        # Check if target table exists in student schema
-
+        # Check if all target tables exist in student schema
         stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
         try:
-
-            stud_meta = inspect_table_catalog(student_schema, tbl_name, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
-
+            for t_name in target_dml_tables:
+                stud_meta = inspect_table_catalog(student_schema, t_name, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
+                if not stud_meta.get("exists"):
+                    return {
+                        "is_correct": False,
+                        "score": 0,
+                        "eval_status": "table_not_found",
+                        "feedback": f"Tabel '{t_name}' belum dibuat di skema database pribadi Anda. Silakan jalankan perintah CREATE TABLE terlebih dahulu pada soal sebelumnya.",
+                        "student_result": None
+                    }
         finally:
-
             if stud_conn and not stud_conn.closed:
-
                 stud_conn.close()
 
-
-
-        if not stud_meta.get("exists"):
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "table_not_found",
-
-                "feedback": f"Tabel '{tbl_name}' belum dibuat di skema database pribadi Anda. Silakan jalankan perintah CREATE TABLE terlebih dahulu pada soal sebelumnya.",
-
-                "student_result": None
-
-            }
-
-
-
         # Execute student's INSERT INTO query in sandbox
-
         stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
 
-        
-
         # If execution failed with syntax error other than duplicate key / unique constraint
-
         if not stud_res.get("success"):
-
             err_msg = stud_res.get("error", "")
-
             is_dup_key = ("duplicate key" in err_msg.lower() or "unique constraint" in err_msg.lower())
-
             if not is_dup_key:
-
                 return {
-
                     "is_correct": False,
-
                     "score": 0,
-
                     "eval_status": "syntax_error",
-
                     "feedback": f"Error Eksekusi SQL: {err_msg}",
-
                     "student_result": stud_res
-
                 }
-
-
 
         # If lecturer provided expected_query containing INSERT INTO
-
         if expected_query and ("INSERT INTO" in expected_query.upper()):
-
             # Compile reference DML in isolated temporary schema
-
-            ref_dml_res = compile_reference_dml(expected_query, tbl_name, student_schema, dbname=DEFAULT_EXAM_DB)
-
+            ref_dml_res = compile_reference_dml(expected_query, target_dml_tables, student_schema, dbname=DEFAULT_EXAM_DB)
             if not ref_dml_res.get("success"):
-
                 return {
-
                     "is_correct": False,
-
                     "score": 0,
-
                     "eval_status": "reference_error",
-
                     "feedback": f"Peringatan Evaluator: {ref_dml_res.get('error')}",
-
                     "student_result": stud_res
-
                 }
 
+            all_diagnostics = {}
+            for t_name in target_dml_tables:
+                # Query student's current records in sandbox
+                stud_query_res = execute_student_query(f"SELECT * FROM {t_name};", active_db=target_db_clean, nim=nim)
+                if not stud_query_res.get("success"):
+                    return {
+                        "is_correct": False,
+                        "score": 0,
+                        "eval_status": "syntax_error",
+                        "feedback": f"Gagal membaca data dari tabel '{t_name}': {stud_query_res.get('error')}",
+                        "student_result": stud_query_res
+                    }
 
+                t_ref_info = ref_dml_res.get("tables", {}).get(t_name.lower(), {})
+                ref_cols = t_ref_info.get("columns", [])
+                ref_rows = t_ref_info.get("rows", [])
 
-            # Query student's current records in sandbox
+                is_valid, comp_msg, details = compare_table_records(
+                    ref_columns=ref_cols,
+                    ref_rows=ref_rows,
+                    stud_columns=stud_query_res.get("columns", []),
+                    stud_rows=stud_query_res.get("rows", []),
+                    table_name=t_name
+                )
+                all_diagnostics[t_name] = details
+                if not is_valid:
+                    return {
+                        "is_correct": False,
+                        "score": 0,
+                        "eval_status": "wrong_data",
+                        "feedback": comp_msg,
+                        "student_result": stud_query_res,
+                        "diagnostics": all_diagnostics
+                    }
 
-            stud_query_res = execute_student_query(f"SELECT * FROM {tbl_name};", active_db=target_db_clean, nim=nim)
-
-            if not stud_query_res.get("success"):
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "syntax_error",
-
-                    "feedback": f"Gagal membaca data dari tabel '{tbl_name}': {stud_query_res.get('error')}",
-
-                    "student_result": stud_query_res
-
-                }
-
-
-
-            # Deep record & value comparison
-
-            is_valid, comp_msg, details = compare_table_records(
-
-                ref_columns=ref_dml_res.get("columns", []),
-
-                ref_rows=ref_dml_res.get("rows", []),
-
-                stud_columns=stud_query_res.get("columns", []),
-
-                stud_rows=stud_query_res.get("rows", []),
-
-                table_name=tbl_name
-
-            )
-
-
-
-            if is_valid:
-
-                return {
-
-                    "is_correct": True,
-
-                    "score": int(score_weight),
-
-                    "eval_status": "correct",
-
-                    "feedback": f"Sempurna! Seluruh {len(stud_query_res.get('rows', []))} baris data pada tabel '{tbl_name}' berhasil dimasukkan dan nilainya 100% cocok dengan acuan dosen (+{score_weight} Poin).",
-
-                    "student_result": stud_query_res,
-
-                    "diagnostics": details
-
-                }
-
+            if len(target_dml_tables) > 1:
+                feedback_msg = f"Sempurna! Seluruh data pada {len(target_dml_tables)} tabel ({', '.join(target_dml_tables)}) berhasil diisi dan 100% cocok dengan kunci acuan dosen (+{score_weight} Poin)."
             else:
+                feedback_msg = f"Sempurna! Seluruh data pada tabel '{target_dml_tables[0]}' berhasil diisi dan 100% cocok dengan kunci acuan dosen (+{score_weight} Poin)."
 
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "wrong_data",
-
-                    "feedback": comp_msg,
-
-                    "student_result": stud_query_res,
-
-                    "diagnostics": details
-
-                }
-
+            return {
+                "is_correct": True,
+                "score": int(score_weight),
+                "eval_status": "correct",
+                "feedback": feedback_msg,
+                "student_result": stud_res,
+                "diagnostics": all_diagnostics
+            }
         else:
-
-            # Fallback if no expected_query specified: check if table has rows
-
-            stud_query_res = execute_student_query(f"SELECT COUNT(*) FROM {tbl_name};", active_db=target_db_clean, nim=nim)
-
-            cnt = stud_query_res.get("rows", [[0]])[0][0] if stud_query_res.get("rows") else 0
-
-            if cnt > 0:
-
-                return {
-
-                    "is_correct": True,
-
-                    "score": int(score_weight),
-
-                    "eval_status": "correct",
-
-                    "feedback": f"Sempurna! Data berhasil dimasukkan ke tabel '{tbl_name}' ({cnt} baris tersimpan) (+{score_weight} Poin).",
-
-                    "student_result": stud_res
-
-                }
-
-            else:
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "no_data_affected",
-
-                    "feedback": f"Tabel '{tbl_name}' masih kosong setelah kueri dijalankan.",
-
-                    "student_result": stud_res
-
-                }
+            # Fallback if no expected_query specified
+            for t_name in target_dml_tables:
+                stud_query_res = execute_student_query(f"SELECT COUNT(*) FROM {t_name};", active_db=target_db_clean, nim=nim)
+                cnt = stud_query_res.get("rows", [[0]])[0][0] if stud_query_res.get("rows") else 0
+                if cnt == 0:
+                    return {
+                        "is_correct": False,
+                        "score": 0,
+                        "eval_status": "no_data_affected",
+                        "feedback": f"Tabel '{t_name}' masih kosong setelah kueri dijalankan.",
+                        "student_result": stud_res
+                    }
+            return {
+                "is_correct": True,
+                "score": int(score_weight),
+                "eval_status": "correct",
+                "feedback": f"Sempurna! Data berhasil dimasukkan ke tabel ({', '.join(target_dml_tables)}) (+{score_weight} Poin).",
+                "student_result": stud_res
+            }
 
 
 
     # 6. Handle DROP TABLE in sandbox
-
-    if clean_q_upper.startswith("DROP TABLE") and not ddl_tbl:
-
+    if clean_q_upper.startswith("DROP TABLE") and "CREATE TABLE" not in clean_q_upper and "INSERT INTO" not in clean_q_upper:
         stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
         if not stud_res.get("success"):
-
             return {
-
                 "is_correct": False,
-
                 "score": 0,
-
                 "eval_status": "syntax_error",
-
                 "feedback": f"Error Sintaks SQL: {stud_res.get('error')}",
-
                 "student_result": stud_res
-
             }
-
         return {
-
             "is_correct": True,
-
             "score": int(score_weight),
-
             "eval_status": "correct",
-
             "feedback": f"Sempurna! Tabel berhasil dibersihkan dari skema database (+{score_weight} Poin).",
-
             "student_result": stud_res
-
         }
-
-
 
     # 7. Handle SELECT query evaluation
+    is_sandbox = (target_db_clean == "sandbox_pribadi")
+    eval_nim = nim if is_sandbox else "admin_ref"
 
-    stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
+    if is_sandbox:
+        # Extract the SELECT query from expected_query to run before tables might be dropped
+        exp_stmts = [s.strip() for s in (expected_query or "").split(";") if s.strip()]
+        exp_select_stmts = [s for s in exp_stmts if s.upper().startswith("SELECT") or ("SELECT" in s.upper() and not s.upper().startswith("DROP"))]
+        if not exp_select_stmts and expected_query and expected_query.strip():
+            return {
+                "is_correct": False,
+                "score": 0,
+                "eval_status": "wrong_command",
+                "feedback": "Instruksi soal ini bukan merupakan kueri SELECT laporan. Periksa kembali jenis perintah SQL yang diminta pada instruksi soal.",
+                "student_result": None
+            }
+        exp_query_to_run = ";\n".join(exp_select_stmts) if exp_select_stmts else expected_query
+        exp_res = execute_student_query(exp_query_to_run, active_db=target_db_clean, nim=eval_nim)
+        # Also strip any accidental DROP statements from student query during SELECT evaluation to prevent sandbox data loss
+        stud_stmts = [s.strip() for s in submitted_query.split(";") if s.strip()]
+        stud_select_stmts = [s for s in stud_stmts if not s.upper().startswith("DROP")]
+        stud_query_to_run = ";\n".join(stud_select_stmts) if stud_select_stmts else submitted_query
+        stud_res = execute_student_query(stud_query_to_run, active_db=target_db_clean, nim=nim)
+    else:
+        exp_res = execute_student_query(expected_query, active_db=target_db_clean, nim="admin_ref")
+        stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
 
     if not stud_res.get("success"):
-
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "syntax_error",
-
             "feedback": f"Error Sintaks SQL: {stud_res.get('error')}",
-
             "student_result": stud_res
-
         }
-
-
 
     if not expected_query or not expected_query.strip():
-
         # No reference query provided by lecturer -> award full points if executed successfully
-
         return {
-
             "is_correct": True,
-
             "score": int(score_weight),
-
             "eval_status": "correct",
-
             "feedback": f"Query berhasil dieksekusi dengan {stud_res.get('row_count', 0)} baris data (+{score_weight} Poin).",
-
             "student_result": stud_res
-
         }
-
-
-
-    # Execute reference query on target database as admin
-
-    exp_res = execute_student_query(expected_query, active_db=target_db_clean, nim="admin_ref")
 
     if not exp_res.get("success"):
-
+        err_msg = exp_res.get("error", "")
+        if "does not exist" in err_msg.lower():
+            return {
+                "is_correct": False,
+                "score": 0,
+                "eval_status": "table_not_found",
+                "feedback": "Tabel yang dibutuhkan belum tersedia di skema sandbox Anda. Pastikan telah menyelesaikan soal DDL dan DML sebelumnya.",
+                "student_result": stud_res
+            }
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "reference_error",
-
-            "feedback": f"Error pada Kunci Acuan Dosen: {exp_res.get('error')}. Laporkan ke pengawas ujian.",
-
+            "feedback": "Terjadi kendala pada validasi soal. Silakan hubungi pengawas ujian.",
             "student_result": stud_res
-
         }
-
-
 
     # Compare Column Counts
-
     stud_cols = stud_res.get("columns", [])
-
     exp_cols = exp_res.get("columns", [])
 
-    if len(stud_cols) != len(exp_cols):
-
+    # Guard against 0-column false positives
+    if len(stud_cols) == 0:
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "column_mismatch",
-
-            "feedback": f"Jumlah kolom tidak sesuai. Diharapkan {len(exp_cols)} kolom ({', '.join(exp_cols)}), tetapi kueri Anda menghasilkan {len(stud_cols)} kolom ({', '.join(stud_cols)}).",
-
+            "feedback": "Kueri SQL Anda tidak menghasilkan kolom keluaran laporan. Periksa kembali klausa SELECT yang Anda tuliskan.",
             "student_result": stud_res
-
         }
 
+    if len(exp_cols) == 0:
+        return {
+            "is_correct": False,
+            "score": 0,
+            "eval_status": "reference_error",
+            "feedback": "Kueri acuan soal tidak menghasilkan kolom data laporan. Silakan laporkan kepada pengawas ujian.",
+            "student_result": stud_res
+        }
 
+    if len(stud_cols) != len(exp_cols):
+        fb_col = (
+            f"Jumlah kolom hasil query ({len(stud_cols)} kolom) belum sesuai dengan instruksi soal ({len(exp_cols)} kolom). Periksa kembali kolom pada klausa SELECT Anda."
+            if EXAM_HINT_MODE == "guided"
+            else "Daftar kolom keluaran belum sesuai format laporan yang diminta. Periksa kembali atribut atau ekspresi yang harus ditampilkan pada klausa SELECT."
+        )
+        return {
+            "is_correct": False,
+            "score": 0,
+            "eval_status": "column_mismatch",
+            "feedback": fb_col,
+            "student_result": stud_res
+        }
 
     # Compare Column Names
-
     stud_cols_norm = [c.lower() for c in stud_cols]
-
     exp_cols_norm = [c.lower() for c in exp_cols]
-
     if stud_cols_norm != exp_cols_norm:
-
+        fb_names = (
+            f"Nama atau susunan kolom belum sesuai spesifikasi soal. Kolom kueri Anda: [{', '.join(stud_cols)}]. Periksa kembali alias (AS) atau urutan kolom pada klausa SELECT."
+            if EXAM_HINT_MODE == "guided"
+            else "Label penamaan kolom (alias) atau urutan penyajian atribut laporan belum sesuai spesifikasi acuan. Periksa kembali klausa SELECT dan alias (AS) yang digunakan."
+        )
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "column_mismatch",
-
-            "feedback": f"Nama kolom tidak cocok. Diharapkan: [{', '.join(exp_cols)}], Ditemukan: [{', '.join(stud_cols)}]. Periksa alias atau urutan kolom.",
-
+            "feedback": fb_names,
             "student_result": stud_res
-
         }
 
-
-
     # Compare Row Counts
-
     stud_rows = stud_res.get("rows", [])
-
     exp_rows = exp_res.get("rows", [])
-
     if len(stud_rows) != len(exp_rows):
-
+        fb_rows = (
+            f"Jumlah baris data hasil query ({len(stud_rows)} baris) belum sesuai. Periksa kembali filter kondisi WHERE, GROUP BY, atau relasi JOIN Anda."
+            if EXAM_HINT_MODE == "guided"
+            else "Keluaran data yang dihasilkan belum memenuhi kriteria laporan. Periksa kembali logika filter kondisi WHERE, pengelompokan GROUP BY, atau relasi JOIN Anda."
+        )
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "row_count_mismatch",
-
-            "feedback": f"Jumlah baris hasil tidak sesuai. Diharapkan {len(exp_rows)} baris, tetapi kueri Anda menghasilkan {len(stud_rows)} baris. Periksa klausa WHERE atau JOIN Anda.",
-
+            "feedback": fb_rows,
             "student_result": stud_res
-
         }
 
 
@@ -3065,7 +2880,7 @@ def evaluate_sql_submission(
 
                 "eval_status": "wrong_data",
 
-                "feedback": "Data yang dihasilkan belum sesuai dengan kunci acuan dosen. Periksa kembali kondisi filter atau kalkulasi kueri Anda.",
+                "feedback": "Data yang dihasilkan belum sesuai dengan spesifikasi soal. Periksa kembali filter baris, agregasi, atau perhitungan kalkulasi kueri Anda.",
 
                 "student_result": stud_res
 
@@ -3081,7 +2896,7 @@ def evaluate_sql_submission(
 
         "eval_status": "correct",
 
-        "feedback": f"Sempurna! Output kueri Anda 100% cocok dengan kunci acuan dosen (+{score_weight} Poin).",
+        "feedback": f"Sempurna! Output kueri Anda 100% sesuai dengan spesifikasi soal (+{score_weight} Poin).",
 
         "student_result": stud_res
 
@@ -3115,53 +2930,77 @@ def save_submission(
 
         cur = conn.cursor()
 
+        # Check existing submission to prevent score regression (Best Score Wins policy)
         cur.execute(
+            "SELECT score, is_correct, submitted_query, eval_status, feedback FROM submissions WHERE user_id = ? AND question_id = ?;",
+            (user_id, question_id)
+        )
+        existing = cur.fetchone()
 
+        prev_score = int(existing["score"]) if existing and existing["score"] is not None else 0
+        prev_is_correct = int(existing["is_correct"]) if existing and existing["is_correct"] is not None else 0
+        score_retained = False
+
+        if existing and prev_score > score:
+            # Submisi baru menghasilkan nilai lebih rendah -> Pertahankan skor & kueri terbaik sebelumnya
+            effective_score = prev_score
+            effective_is_correct = prev_is_correct
+            effective_query = existing["submitted_query"] or submitted_query
+            effective_eval_status = existing["eval_status"] or eval_status
+            effective_feedback = existing["feedback"] or feedback
+            score_retained = True
+            log_desc = (
+                f"Jawaban Soal ID {question_id} disubmit ulang (Hasil evaluasi baru: {score} Poin, "
+                f"Skor tertinggi {effective_score} Poin tetap dipertahankan)"
+            )
+        else:
+            # Submisi baru bernilai lebih tinggi atau sama (atau submisi pertama kali)
+            effective_score = score
+            effective_is_correct = is_correct
+            effective_query = submitted_query
+            effective_eval_status = eval_status
+            effective_feedback = feedback
+            log_desc = f"Jawaban untuk Soal ID {question_id} disubmit (Nilai: {score}, Benar: {bool(is_correct)})"
+
+        cur.execute(
             """
-
             INSERT INTO submissions (user_id, question_id, submitted_query, submitted_at, status, is_correct, score, eval_status, feedback)
-
             VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'submitted', ?, ?, ?, ?)
-
             ON CONFLICT(user_id, question_id) DO UPDATE SET
-
-                submitted_query = excluded.submitted_query,
-
+                submitted_query = ?,
                 submitted_at = CURRENT_TIMESTAMP,
-
                 status = 'submitted',
-
-                is_correct = excluded.is_correct,
-
-                score = excluded.score,
-
-                eval_status = excluded.eval_status,
-
-                feedback = excluded.feedback;
-
+                is_correct = ?,
+                score = ?,
+                eval_status = ?,
+                feedback = ?;
             """,
-
-            (user_id, question_id, submitted_query, is_correct, score, eval_status, feedback)
-
+            (
+                user_id, question_id, effective_query, effective_is_correct, effective_score, effective_eval_status, effective_feedback,
+                effective_query, effective_is_correct, effective_score, effective_eval_status, effective_feedback
+            )
         )
 
         cur.execute(
-
             """
-
             INSERT INTO exam_logs (user_id, action_type, details)
-
             VALUES (?, 'submit', ?);
-
             """,
-
-            (user_id, f"Jawaban untuk Soal ID {question_id} disubmit (Nilai: {score}, Benar: {bool(is_correct)})")
-
+            (user_id, log_desc)
         )
 
     conn.close()
 
-    return {"status": "success", "message": "Jawaban berhasil disimpan"}
+    return {
+        "status": "success",
+        "message": "Jawaban berhasil disimpan",
+        "score": effective_score,
+        "is_correct": bool(effective_is_correct),
+        "score_retained": score_retained,
+        "previous_score": prev_score,
+        "new_score": score,
+        "retained_query": effective_query
+    }
 
 
 
@@ -3187,50 +3026,40 @@ def get_all_students_progress() -> List[Dict[str, Any]]:
 
     cur = conn.cursor()
 
-    
+
 
     # Calculate online status based on 60-second inactivity window
-
     query = """
-
-    SELECT 
-
+    SELECT
         u.id,
-
         u.nim,
-
         u.name,
-
         u.ip_address,
-
         u.status AS raw_status,
-
         u.last_active,
-
         u.selected_category,
-
         COUNT(s.id) AS total_submitted,
-
         COALESCE(SUM(s.score), 0) AS total_score,
-
+        COUNT(CASE WHEN s.is_correct = 1 THEN 1 END) AS correct_count,
         (
-
-            SELECT COUNT(*) 
-
-            FROM exam_logs l 
-
+            SELECT COALESCE(SUM(score_weight), 0)
+            FROM questions q
+            WHERE q.category = COALESCE(NULLIF(u.selected_category, ''), 'FINAL-A')
+        ) AS max_score,
+        (
+            SELECT COUNT(*)
+            FROM questions q
+            WHERE q.category = COALESCE(NULLIF(u.selected_category, ''), 'FINAL-A')
+        ) AS total_questions,
+        (
+            SELECT COUNT(*)
+            FROM exam_logs l
             WHERE l.user_id = u.id AND l.action_type = 'blur_tab'
-
         ) AS tab_switches
-
     FROM users u
-
     LEFT JOIN submissions s ON u.id = s.user_id
-
     GROUP BY u.id
-
-    ORDER BY u.nim ASC;
-
+    ORDER BY total_score DESC, u.nim ASC;
     """
 
     cur.execute(query)
@@ -3303,37 +3132,28 @@ def log_exam_event(user_id: Optional[int], action_type: str, details: str):
 
 
 
-def get_recent_exam_logs(limit: int = 40) -> List[Dict[str, Any]]:
-
+def get_recent_exam_logs(limit: int = 50, offset: int = 0) -> Tuple[List[Dict[str, Any]], int]:
+    """Returns paginated exam logs along with total count."""
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
     conn = get_sqlite_conn()
-
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM exam_logs;")
+    total = cur.fetchone()[0]
 
     cur.execute(
-
         """
-
         SELECT l.id, l.user_id, u.nim, u.name, l.action_type, l.details, l.timestamp
-
         FROM exam_logs l
-
         LEFT JOIN users u ON l.user_id = u.id
-
         ORDER BY l.id DESC
-
-        LIMIT ?;
-
+        LIMIT ? OFFSET ?;
         """,
-
-        (limit,)
-
+        (limit, offset)
     )
-
     rows = cur.fetchall()
-
     conn.close()
-
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows], total
 
 
 
@@ -3394,33 +3214,70 @@ def export_all_submissions_csv() -> str:
 def export_submissions_zip_bytes() -> bytes:
     conn = get_sqlite_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, nim, name FROM users ORDER BY nim ASC;")
+    cur.execute("SELECT id, nim, name, ip_address, selected_category FROM users ORDER BY nim ASC;")
     users = cur.fetchall()
 
     zip_buffer = io.BytesIO()
+    summary_rows = []
+
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for u in users:
             user_id = u["id"]
             nim = u["nim"]
             name = re.sub(r'[^a-zA-Z0-9_-]', '_', u["name"])
+            category = u["selected_category"] or "FINAL-A"
 
             cur.execute(
                 """
                 SELECT q.question_number, q.title, q.score_weight, s.submitted_query, s.submitted_at, s.score, s.is_correct
                 FROM questions q
                 LEFT JOIN submissions s ON q.id = s.question_id AND s.user_id = ?
+                WHERE q.category = ?
                 ORDER BY q.question_number ASC;
                 """,
-                (user_id,)
+                (user_id, category)
             )
             q_rows = cur.fetchall()
 
+            if not q_rows:
+                cur.execute(
+                    """
+                    SELECT q.question_number, q.title, q.score_weight, s.submitted_query, s.submitted_at, s.score, s.is_correct
+                    FROM questions q
+                    LEFT JOIN submissions s ON q.id = s.question_id AND s.user_id = ?
+                    ORDER BY q.question_number ASC;
+                    """,
+                    (user_id,)
+                )
+                q_rows = cur.fetchall()
+
+            user_total_score = sum((qr["score"] or 0) for qr in q_rows)
+            user_max_score = sum((qr["score_weight"] or 0) for qr in q_rows)
+            user_correct_count = sum(1 for qr in q_rows if qr["is_correct"])
+            total_q = len(q_rows)
+            pct = round((user_total_score / user_max_score * 100), 1) if user_max_score > 0 else 0.0
+
+            summary_rows.append({
+                "nim": nim,
+                "name": u["name"],
+                "ip_address": u["ip_address"] or "-",
+                "category": category,
+                "total_score": user_total_score,
+                "max_score": user_max_score,
+                "correct_count": user_correct_count,
+                "total_q": total_q,
+                "pct": pct
+            })
+
             file_content = [
                 f"-- ============================================================",
-                f"-- Lembar Jawaban Ujian Praktikum Basis Data",
-                f"-- NIM  : {nim}",
-                f"-- Nama : {u['name']}",
-                f"-- Diekspor pada: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"-- LEMBAR JAWABAN UJIAN PRAKTIKUM BASIS DATA",
+                f"-- NIM           : {nim}",
+                f"-- Nama          : {u['name']}",
+                f"-- Paket Soal    : {category}",
+                f"-- Total Nilai   : {user_total_score} / {user_max_score} Poin ({pct}%)",
+                f"-- Jawaban Benar : {user_correct_count} dari {total_q} Soal",
+                f"-- Diekspor pada : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 f"-- ============================================================\n"
             ]
 
@@ -3446,6 +3303,20 @@ def export_submissions_zip_bytes() -> bytes:
             sql_data = "\n".join(file_content)
             zip_file.writestr(f"{nim}_{name}.sql", sql_data)
 
+        # Generate rekap_nilai_ujian.csv inside the ZIP file
+        summary_output = io.StringIO()
+        csv_writer = csv.writer(summary_output)
+        csv_writer.writerow([
+            "NIM", "Nama Mahasiswa", "IP Address", "Paket Soal",
+            "Total Skor", "Skor Maksimal", "Soal Benar", "Total Soal", "Persentase Nilai (%)"
+        ])
+        for s in summary_rows:
+            csv_writer.writerow([
+                s["nim"], s["name"], s["ip_address"], s["category"],
+                s["total_score"], s["max_score"], s["correct_count"], s["total_q"], f"{s['pct']}%"
+            ])
+        zip_file.writestr("rekap_nilai_ujian.csv", summary_output.getvalue().encode("utf-8-sig"))
+
     conn.close()
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
@@ -3464,7 +3335,7 @@ def export_all_logs_csv() -> str:
 
         """
 
-        SELECT 
+        SELECT
 
             l.id,
 
@@ -3502,17 +3373,17 @@ def export_all_logs_csv() -> str:
 
     writer.writerow([
 
-        "ID Log", 
+        "ID Log",
 
-        "Waktu", 
+        "Waktu",
 
-        "NIM", 
+        "NIM",
 
-        "Nama Mahasiswa", 
+        "Nama Mahasiswa",
 
-        "IP Address", 
+        "IP Address",
 
-        "Tipe Aksi", 
+        "Tipe Aksi",
 
         "Detail Aktivitas"
 
@@ -3556,13 +3427,13 @@ def export_tab_switches_csv() -> str:
 
     cur = conn.cursor()
 
-    
+
 
     cur.execute(
 
         """
 
-        SELECT 
+        SELECT
 
             u.id,
 
@@ -3578,9 +3449,9 @@ def export_tab_switches_csv() -> str:
 
             (
 
-                SELECT COUNT(*) 
+                SELECT COUNT(*)
 
-                FROM exam_logs l 
+                FROM exam_logs l
 
                 WHERE l.user_id = u.id AND l.action_type = 'blur_tab'
 
@@ -3604,19 +3475,19 @@ def export_tab_switches_csv() -> str:
 
     writer.writerow([
 
-        "NIM", 
+        "NIM",
 
-        "Nama Mahasiswa", 
+        "Nama Mahasiswa",
 
-        "IP Address", 
+        "IP Address",
 
-        "Total Peringatan Tab", 
+        "Total Peringatan Tab",
 
         "Status Sesi",
 
-        "Waktu Kejadian", 
+        "Waktu Kejadian",
 
-        "Aksi", 
+        "Aksi",
 
         "Detail Aktivitas"
 
@@ -3788,7 +3659,7 @@ def init_postgres_db() -> Tuple[bool, str]:
 
     admin_pass = PG_ADMIN_PASS or None
 
-    
+
 
     # 1. Coba koneksi ke PostgreSQL
 
@@ -3932,13 +3803,39 @@ def init_postgres_db() -> Tuple[bool, str]:
 
 
 
+        # Pastikan student_role memiliki hak akses CONNECT, USAGE, dan SELECT pada semua database master
+
+        for m_db in sorted(list(ALLOWED_MASTER_DBS)):
+
+            try:
+
+                m_conn = get_pg_admin_connection(dbname=m_db)
+
+                m_conn.autocommit = True
+
+                m_cur = m_conn.cursor()
+
+                m_cur.execute(f"GRANT CONNECT ON DATABASE {sql.Identifier(m_db).as_string(m_conn)} TO {PG_STUDENT_USER};")
+
+                grant_student_permissions(m_cur)
+
+                m_cur.close()
+
+                m_conn.close()
+
+            except Exception as m_err:
+
+                print(f"[INIT PG] Sinkronisasi izin database '{m_db}' dilewati: {m_err}")
+
+
+
         # Periksa apakah sudah ada tabel di user schemas
 
         cur.execute("""
 
-            SELECT COUNT(*) 
+            SELECT COUNT(*)
 
-            FROM information_schema.tables 
+            FROM information_schema.tables
 
             WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
 
@@ -3960,7 +3857,7 @@ def init_postgres_db() -> Tuple[bool, str]:
 
         if table_count == 0:
 
-            ok, msg = reset_classicmodels_database()
+            ok, msg = reset_target_database(PG_DB)
 
             if not ok:
 
@@ -3980,6 +3877,320 @@ def init_postgres_db() -> Tuple[bool, str]:
 
         return False, f"Gagal setup PostgreSQL: {e}"
 
+
+
+def execute_pg_dump(cursor, sql_text: str):
+    r"""
+    Executes PostgreSQL SQL dump text supporting:
+    - Standard SQL statements (DDL/DML)
+    - Dollar-quoted blocks ($$ ... $$ or $tag$ ... $tag$)
+    - COPY <table> [(cols)] FROM stdin; followed by tab-delimited data and \.
+    - Gracefully skips unsupported extensions (e.g. pgvector) and benign permission issues
+    """
+    def strip_leading_comments(stmt: str) -> str:
+        lines = stmt.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line or line.startswith('--'):
+                i += 1
+                continue
+            break
+        return '\n'.join(lines[i:]).strip()
+
+    lines = sql_text.splitlines(keepends=True)
+    i = 0
+    n = len(lines)
+
+    current_stmt_lines = []
+    in_dollar_tag = None
+
+    dollar_regex = re.compile(r'(\$[a-zA-Z0-9_]*\$)')
+    copy_regex = re.compile(r'^\s*COPY\s+(.+?)\s+FROM\s+stdin\s*;?', re.IGNORECASE)
+
+    def run_stmt(s: str):
+        if not s:
+            return
+        try:
+            cursor.execute(s)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "extension" in err_msg or "vector" in err_msg or "film_embedding" in err_msg or "transaction_timeout" in err_msg or "unrecognized configuration parameter" in err_msg:
+                pass
+            elif "must be owner" in err_msg or "permission denied" in err_msg:
+                pass
+            else:
+                raise
+
+    while i < n:
+        line = lines[i]
+
+        # Check for COPY ... FROM stdin
+        if not in_dollar_tag and copy_regex.match(line):
+            if current_stmt_lines:
+                stmt = strip_leading_comments(''.join(current_stmt_lines))
+                current_stmt_lines = []
+                run_stmt(stmt)
+
+            copy_stmt = line.strip()
+            if not copy_stmt.endswith(';'):
+                copy_stmt += ';'
+            data_lines = []
+            i += 1
+            while i < n:
+                dline = lines[i]
+                if dline.strip() == '\\.':
+                    i += 1
+                    break
+                data_lines.append(dline)
+                i += 1
+
+            data_io = io.StringIO(''.join(data_lines))
+            try:
+                cursor.copy_expert(copy_stmt, data_io)
+            except Exception as ce:
+                err_ce = str(ce).lower()
+                if "vector" in err_ce or "film_embedding" in err_ce:
+                    pass
+                else:
+                    raise
+            continue
+
+        # Check for dollar quote tags
+        matches = dollar_regex.findall(line)
+        for tag in matches:
+            if in_dollar_tag is None:
+                in_dollar_tag = tag
+            elif in_dollar_tag == tag:
+                in_dollar_tag = None
+
+        current_stmt_lines.append(line)
+
+        # Statement finishes on ';' if outside dollar quote tag
+        if in_dollar_tag is None:
+            stripped = line.rstrip()
+            if stripped.endswith(';'):
+                stmt = strip_leading_comments(''.join(current_stmt_lines))
+                current_stmt_lines = []
+                run_stmt(stmt)
+
+        i += 1
+
+    if current_stmt_lines:
+        stmt = strip_leading_comments(''.join(current_stmt_lines))
+        run_stmt(stmt)
+
+
+def grant_student_permissions(cursor):
+    """
+    Grants USAGE, SELECT on all tables and sequences, and default privileges
+    in public schema and all user schemas to PG_STUDENT_USER, revoking CREATE.
+    """
+    cursor.execute(f"""
+        DO $$
+        DECLARE
+            sch text;
+        BEGIN
+            FOR sch IN
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                  AND schema_name NOT LIKE 'pg_%'
+                  AND schema_name NOT LIKE 'sandbox_%'
+            LOOP
+                EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
+                EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
+                EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
+                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT ON TABLES TO %I;', sch, '{PG_STUDENT_USER}');
+                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I;', sch, '{PG_STUDENT_USER}');
+                EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM PUBLIC;', sch);
+                EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I;', sch, '{PG_STUDENT_USER}');
+            END LOOP;
+        END
+        $$;
+    """)
+
+
+def reset_target_database(target_db: str = DEFAULT_EXAM_DB, custom_sql_text: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Resets the target PostgreSQL database to a clean initial state or executes a custom SQL dump.
+    Supports COPY ... FROM stdin, dollar quotes, schema cleanup, and student_role permissions.
+    """
+    target_db = (target_db or DEFAULT_EXAM_DB).strip()
+    if target_db == "sandbox_pribadi":
+        target_db = DEFAULT_EXAM_DB
+    if target_db.lower() not in ALLOWED_MASTER_DBS:
+        return False, f"Target database '{target_db}' tidak valid. Pilihan yang diizinkan: {', '.join(sorted(ALLOWED_MASTER_DBS))}."
+
+    admin_pass = PG_ADMIN_PASS or None
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=target_db,
+            user=PG_ADMIN_USER,
+            password=admin_pass,
+            host=PG_HOST,
+            port=PG_PORT
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 120000;")
+
+        data_folder = os.path.join(BASE_DIR, "data")
+
+        def _get_pagila_sql(fname: str) -> str:
+            for sub in ["pagila-master", "pagila-0.10.1"]:
+                candidate = os.path.join(data_folder, sub, fname)
+                if os.path.exists(candidate):
+                    return candidate
+            return os.path.join(data_folder, fname)
+
+        # Detect whether custom_sql_text is a DDL (schema) or data-only dump (Subtask 4.1)
+        is_data_only = False
+        if custom_sql_text:
+            has_ddl = bool(re.search(r'\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|TYPE|DOMAIN|SCHEMA)\b', custom_sql_text, re.IGNORECASE))
+            is_data_only = not has_ddl
+
+        if is_data_only:
+            # Data-only dump: DO NOT drop schema! Preserve existing tables.
+            cur.execute("CREATE SCHEMA IF NOT EXISTS public;")
+            cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+            grant_student_permissions(cur)
+
+            # Check if tables already exist in public schema
+            cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';")
+            table_count = cur.fetchone()[0]
+
+            # If public schema is currently empty (0 tables), ensure baseline schema is loaded first
+            if table_count == 0:
+                if target_db.lower() == "pagila":
+                    schema_path = _get_pagila_sql("pagila-schema.sql")
+                    if os.path.exists(schema_path):
+                        with open(schema_path, "r", encoding="utf-8", errors="ignore") as f:
+                            execute_pg_dump(cur, f.read())
+                elif target_db.lower() == "classicmodels":
+                    cm_path = os.path.join(data_folder, "classicmodels.sql")
+                    if os.path.exists(cm_path):
+                        with open(cm_path, "r", encoding="utf-8", errors="ignore") as f:
+                            execute_pg_dump(cur, f.read())
+
+            # Now execute the data-only custom dump into existing/prepared tables
+            execute_pg_dump(cur, custom_sql_text)
+        else:
+            # Full schema dump or clean reset: drop and recreate public schema
+            if target_db.lower() == "classicmodels":
+                cur.execute("DROP SCHEMA IF EXISTS classicmodels CASCADE;")
+
+            cur.execute("DROP SCHEMA IF EXISTS public CASCADE;")
+            cur.execute("CREATE SCHEMA public;")
+            cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+            cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC;")
+            cur.execute("SET search_path = public;")
+
+            if custom_sql_text:
+                execute_pg_dump(cur, custom_sql_text)
+            else:
+                if target_db.lower() == "pagila":
+                    schema_path = _get_pagila_sql("pagila-schema.sql")
+                    data_path = _get_pagila_sql("pagila-data.sql")
+                    if os.path.exists(schema_path):
+                        with open(schema_path, "r", encoding="utf-8", errors="ignore") as f:
+                            execute_pg_dump(cur, f.read())
+                    if os.path.exists(data_path):
+                        with open(data_path, "r", encoding="utf-8", errors="ignore") as f:
+                            execute_pg_dump(cur, f.read())
+                elif target_db.lower() == "classicmodels":
+                    cm_path = os.path.join(data_folder, "classicmodels.sql")
+                    if os.path.exists(cm_path):
+                        with open(cm_path, "r", encoding="utf-8", errors="ignore") as f:
+                            execute_pg_dump(cur, f.read())
+
+        # Ensure permissions and default privileges for student_role
+        cur.execute("SET search_path = public;")
+        grant_student_permissions(cur)
+
+        # Invalidate connection pools for this DB
+        with _PG_POOL_LOCK:
+            if target_db in PG_DB_POOLS:
+                try:
+                    PG_DB_POOLS[target_db].closeall()
+                except Exception:
+                    pass
+                del PG_DB_POOLS[target_db]
+
+        cur.close()
+        conn.close()
+
+        invalidate_schema_cache(target_db)
+
+        success_msg = f"Data dari file SQL berhasil dimasukkan ke tabel database '{target_db}'." if is_data_only else f"Database '{target_db}' berhasil di-reset dan data berhasil dimuat ulang."
+        return True, success_msg
+    except Exception as e:
+        if conn and not conn.closed:
+            conn.close()
+        return False, f"Gagal mereset database '{target_db}': {e}"
+
+
+def reset_classicmodels_database() -> Tuple[bool, str]:
+    return reset_target_database("classicmodels")
+
+
+def reset_pagila_database() -> Tuple[bool, str]:
+    return reset_target_database("pagila")
+
+
+def empty_target_database(target_db: str = DEFAULT_EXAM_DB) -> Tuple[bool, str]:
+    """
+    Clears all tables, views, sequences, and types in the target PostgreSQL database (0 tables).
+    Prepares a clean, empty public schema with student_role permissions without loading default datasets.
+    """
+    target_db = (target_db or DEFAULT_EXAM_DB).strip()
+    if target_db == "sandbox_pribadi":
+        target_db = DEFAULT_EXAM_DB
+    if target_db.lower() not in ALLOWED_MASTER_DBS:
+        return False, f"Target database '{target_db}' tidak valid. Pilihan yang diizinkan: {', '.join(sorted(ALLOWED_MASTER_DBS))}."
+
+    admin_pass = PG_ADMIN_PASS or None
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=target_db,
+            user=PG_ADMIN_USER,
+            password=admin_pass,
+            host=PG_HOST,
+            port=PG_PORT
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 120000;")
+
+        if target_db.lower() == "classicmodels":
+            cur.execute("DROP SCHEMA IF EXISTS classicmodels CASCADE;")
+
+        cur.execute("DROP SCHEMA IF EXISTS public CASCADE;")
+        cur.execute("CREATE SCHEMA public;")
+        cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+        cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC;")
+        cur.execute("SET search_path = public;")
+
+        grant_student_permissions(cur)
+
+        cur.close()
+        conn.close()
+
+        with _PG_POOL_LOCK:
+            if target_db in PG_DB_POOLS:
+                try:
+                    PG_DB_POOLS[target_db].closeall()
+                except Exception:
+                    pass
+                del PG_DB_POOLS[target_db]
+
+        return True, f"Database '{target_db}' berhasil dikosongkan total (0 tabel)."
+    except Exception as e:
+        if conn and not conn.closed:
+            conn.close()
+        return False, f"Gagal mengosongkan database '{target_db}': {e}"
 
 
 def get_pg_admin_connection(dbname: str = DEFAULT_EXAM_DB):
@@ -4017,47 +4228,82 @@ _INITIALIZED_SANDBOX_SCHEMAS: Set[str] = set()
 
 
 PG_DB_POOLS: Dict[str, pool.ThreadedConnectionPool] = {}
-
 PG_STUDENT_POOL: Optional[pool.ThreadedConnectionPool] = None
+PG_POOL_MAXCONN: int = int(os.environ.get("PG_POOL_MAXCONN", "50"))
 
+class PoolTracker:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.wait_times: List[float] = []
+        self.exhausted_count: int = 0
+        self.total_acquired: int = 0
 
+    def record_acquisition(self, duration_sec: float):
+        with self.lock:
+            self.total_acquired += 1
+            self.wait_times.append(duration_sec)
+            if len(self.wait_times) > 100:
+                self.wait_times.pop(0)
+
+    def record_exhaustion(self):
+        with self.lock:
+            self.exhausted_count += 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self.lock:
+            avg_wait_ms = (sum(self.wait_times) / len(self.wait_times) * 1000.0) if self.wait_times else 0.0
+            max_wait_ms = (max(self.wait_times) * 1000.0) if self.wait_times else 0.0
+            return {
+                "total_acquired": self.total_acquired,
+                "avg_wait_ms": round(avg_wait_ms, 2),
+                "max_wait_ms": round(max_wait_ms, 2),
+                "exhausted_count": self.exhausted_count,
+            }
+
+_POOL_TRACKER = PoolTracker()
+
+def acquire_pooled_connection(pool_inst: pool.ThreadedConnectionPool, dbname: str = "default"):
+    """
+    Acquires a connection from the ThreadedConnectionPool while measuring wait time.
+    Gracefully handles pool exhaustion with a clear user-facing error message.
+    """
+    start_t = time.perf_counter()
+    try:
+        conn = pool_inst.getconn()
+        duration = time.perf_counter() - start_t
+        _POOL_TRACKER.record_acquisition(duration)
+        if duration > 1.0:
+            print(f"[WARN] Connection pool acquisition took {duration:.3f}s for db '{dbname}'")
+        return conn
+    except pool.PoolError as e:
+        _POOL_TRACKER.record_exhaustion()
+        print(f"[ERROR] Connection pool exhausted for db '{dbname}': {e}")
+        raise RuntimeError("Koneksi database sibuk (connection pool penuh). Silakan coba kembali dalam beberapa detik.") from e
+
+def get_pool_stats() -> Dict[str, Any]:
+    """Returns runtime metrics for the PostgreSQL connection pool."""
+    stats = _POOL_TRACKER.get_stats()
+    stats["active_pools"] = list(PG_DB_POOLS.keys())
+    return stats
 
 def get_pg_student_pool_for_db(dbname: str = DEFAULT_EXAM_DB) -> pool.ThreadedConnectionPool:
-
     global PG_DB_POOLS
-
     target_dbname = DEFAULT_EXAM_DB if dbname == "sandbox_pribadi" else dbname
-
     if target_dbname not in ["pagila", "classicmodels", "praktikum_db"]:
-
         target_dbname = DEFAULT_EXAM_DB
 
-
-
     if target_dbname not in PG_DB_POOLS or PG_DB_POOLS[target_dbname] is None or PG_DB_POOLS[target_dbname].closed:
-
         with _PG_POOL_LOCK:
-
             if target_dbname not in PG_DB_POOLS or PG_DB_POOLS[target_dbname] is None or PG_DB_POOLS[target_dbname].closed:
-
                 PG_DB_POOLS[target_dbname] = pool.ThreadedConnectionPool(
-
                     minconn=2,
-
-                    maxconn=35,
-
+                    maxconn=PG_POOL_MAXCONN,
                     dbname=target_dbname,
-
                     user=PG_STUDENT_USER,
-
                     password=PG_STUDENT_PASS or None,
-
                     host=PG_HOST,
-
                     port=PG_PORT
-
                 )
-
     return PG_DB_POOLS[target_dbname]
 
 
@@ -4239,144 +4485,126 @@ def cleanup_student_sandbox_schema(nim: Optional[str]) -> bool:
 
 
 def split_sql_statements(sql_text: str) -> List[str]:
-
-    """Splits a multi-statement SQL script into individual statements, ignoring semicolons inside quotes/comments."""
-
+    """Splits a multi-statement SQL script into individual statements, ignoring semicolons inside quotes, comments, and dollar-quoted blocks ($$ or $tag$)."""
     statements = []
-
     current = []
-
     in_single_quote = False
-
     in_double_quote = False
-
     in_line_comment = False
-
     in_block_comment = False
-
+    dollar_tag = None
     i = 0
-
     n = len(sql_text)
 
     while i < n:
-
         c = sql_text[i]
-
         next_c = sql_text[i + 1] if i + 1 < n else ''
 
-        
+        # If inside a dollar-quoted block, skip until matching closing tag
+        if dollar_tag is not None:
+            if sql_text.startswith(dollar_tag, i):
+                current.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+                continue
+            current.append(c)
+            i += 1
+            continue
 
         # Check comments
-
         if not in_single_quote and not in_double_quote:
-
             if not in_block_comment and c == '-' and next_c == '-':
-
                 in_line_comment = True
-
                 i += 2
-
                 continue
-
             if in_line_comment:
-
                 if c == '\n':
-
                     in_line_comment = False
-
                 i += 1
-
                 continue
-
             if not in_line_comment and c == '/' and next_c == '*':
-
                 in_block_comment = True
-
                 i += 2
-
+                continue
+            if in_block_comment:
+                if c == '*' and next_c == '/':
+                    in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
                 continue
 
-            if in_block_comment:
-
-                if c == '*' and next_c == '/':
-
-                    in_block_comment = False
-
-                    i += 2
-
+            # Check dollar quote start: $tag$ or $$
+            if c == '$':
+                m = re.match(r'^\$[A-Za-z0-9_]*\$', sql_text[i:])
+                if m:
+                    dollar_tag = m.group(0)
+                    current.append(dollar_tag)
+                    i += len(dollar_tag)
                     continue
 
-                i += 1
-
-                continue
-
-        
-
         # Check quotes
-
         if c == "'" and not in_double_quote and not in_line_comment and not in_block_comment:
-
             if in_single_quote and next_c == "'":
-
                 current.append("''")
-
                 i += 2
-
                 continue
-
             in_single_quote = not in_single_quote
-
             current.append(c)
-
             i += 1
-
             continue
-
         elif c == '"' and not in_single_quote and not in_line_comment and not in_block_comment:
-
             in_double_quote = not in_double_quote
-
             current.append(c)
-
             i += 1
-
             continue
 
-            
-
-        # Semicolon outside quotes/comments
-
-        if c == ';' and not in_single_quote and not in_double_quote and not in_line_comment and not in_block_comment:
-
+        # Semicolon outside quotes/comments/dollar quotes
+        if c == ';' and not in_single_quote and not in_double_quote and not in_line_comment and not in_block_comment and dollar_tag is None:
             stmt = "".join(current).strip()
-
             if stmt:
-
                 statements.append(stmt)
-
             current = []
-
             i += 1
-
             continue
-
-            
 
         current.append(c)
-
         i += 1
 
-        
-
     last_stmt = "".join(current).strip()
-
     if last_stmt:
-
         statements.append(last_stmt)
-
     return statements
 
 
+
+
+# ==============================================================================
+# P0 Security Hardening Constants & Helpers
+# ==============================================================================
+ALLOWED_MASTER_DBS = {"pagila", "classicmodels"}
+ALLOWED_STUDENT_DBS = {"pagila", "classicmodels", "sandbox_pribadi"}
+MAX_STUDENT_QUERY_LENGTH = 10000
+MAX_RESULT_ROWS = 500
+MAX_OUTPUT_CELL_CHARS = 4000
+
+def sanitize_db_error_message(err_obj: Any) -> str:
+    """
+    Sanitizes database error messages to prevent leaking connection strings,
+    passwords, host IPs, internal filesystem paths, or system stack traces.
+    """
+    raw = str(err_obj)
+    sensitive = [
+        "password", "connection refused", "could not connect", "pool",
+        "socket", "authentication failed", "peer authentication",
+        "pg_hba.conf", "server closed the connection"
+    ]
+    if any(k in raw.lower() for k in sensitive):
+        return "Terjadi kendala koneksi ke server database. Silakan coba beberapa saat lagi atau hubungi pengawas."
+    clean = re.sub(r'[A-Za-z]:\[^\s:]+', '', raw)
+    clean = re.sub(r'/[^\s:]+/[^\s:]+', '', clean)
+    clean = clean.replace("LINE 1: ", "\nDi baris: ")
+    return clean.strip()
 
 def check_dangerous_sql(query_text: str, is_sandbox_student: bool = False) -> Optional[str]:
 
@@ -4384,7 +4612,7 @@ def check_dangerous_sql(query_text: str, is_sandbox_student: bool = False) -> Op
 
     cleaned = re.sub(r'--.*?$|/\*.*?\*/', '', query_text, flags=re.MULTILINE)
 
-    
+
 
     if is_sandbox_student:
 
@@ -4484,7 +4712,7 @@ def check_dangerous_sql(query_text: str, is_sandbox_student: bool = False) -> Op
 
         ]
 
-        
+
 
     for pat in forbidden_patterns:
 
@@ -4530,9 +4758,15 @@ def execute_student_query(
 
         return {"success": False, "error": "Query SQL tidak boleh kosong."}
 
+    if len(query_text) > MAX_STUDENT_QUERY_LENGTH:
 
+        return {"success": False, "error": f"Panjang query melebihi batas maksimal ({MAX_STUDENT_QUERY_LENGTH} karakter)."}
 
     active_db = (active_db or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
+
+    if active_db not in ALLOWED_STUDENT_DBS:
+
+        return {"success": False, "error": f"Database '{active_db}' tidak valid. Pilihan yang diizinkan: {', '.join(sorted(ALLOWED_STUDENT_DBS))}."}
 
     is_sandbox = (active_db == "sandbox_pribadi")
 
@@ -4569,14 +4803,15 @@ def execute_student_query(
             schema_name = init_student_sandbox_schema(nim or "default")
 
             pool_inst = get_pg_student_pool_for_db(DEFAULT_EXAM_DB)
-
-            conn = pool_inst.getconn()
+            conn = acquire_pooled_connection(pool_inst, dbname=DEFAULT_EXAM_DB)
 
             conn.autocommit = True
 
             cur = conn.cursor()
 
-            cur.execute("SET statement_timeout = 3000;")
+            cur.execute("SET statement_timeout = 5000;")
+
+            cur.execute("SET lock_timeout = 3000;")
 
             cur.execute(sql.SQL("SET search_path TO {}, public;").format(sql.Identifier(schema_name)))
 
@@ -4587,6 +4822,8 @@ def execute_student_query(
             stmts = split_sql_statements(clean_query)
 
             last_desc = None
+
+            last_fetched = None
 
             total_affected = 0
 
@@ -4700,9 +4937,13 @@ def execute_student_query(
 
                 executed_any_pg = True
 
-                last_desc = cur.description
+                if cur.description:
 
-                if cur.rowcount and cur.rowcount > 0:
+                    last_desc = cur.description
+
+                    last_fetched = cur.fetchmany(501)
+
+                elif cur.rowcount and cur.rowcount > 0:
 
                     total_affected += cur.rowcount
 
@@ -4718,11 +4959,11 @@ def execute_student_query(
 
 
 
-            if executed_any_pg and last_desc:
+            if executed_any_pg and last_desc and last_fetched is not None:
 
                 columns = [desc[0] for desc in last_desc]
 
-                fetched = cur.fetchmany(501)
+                fetched = last_fetched
 
                 row_count = len(fetched)
 
@@ -4756,7 +4997,13 @@ def execute_student_query(
 
                         else:
 
-                            row_items.append(str(val))
+                            s_val = str(val)
+
+                            if len(s_val) > MAX_OUTPUT_CELL_CHARS:
+
+                                s_val = s_val[:MAX_OUTPUT_CELL_CHARS] + " ...[truncated]"
+
+                            row_items.append(s_val)
 
                     rows.append(row_items)
 
@@ -4823,14 +5070,15 @@ def execute_student_query(
         else:
 
             pool_inst = get_pg_student_pool_for_db(active_db)
-
-            conn = pool_inst.getconn()
+            conn = acquire_pooled_connection(pool_inst, dbname=active_db)
 
             conn.autocommit = False
 
             cur = conn.cursor()
 
-            cur.execute("SET statement_timeout = 3000;")
+            cur.execute("SET statement_timeout = 5000;")
+
+            cur.execute("SET lock_timeout = 3000;")
 
             cur.execute("SET search_path TO public;")
 
@@ -4950,7 +5198,7 @@ def execute_student_query(
 
                 pass
 
-        return {"success": False, "error": "Query timeout: Waktu eksekusi melebihi batas 3000 ms (3 detik)."}
+        return {"success": False, "error": "Query timeout: Waktu eksekusi melebihi batas 5 detik atau terkendala lock tabel."}
 
     except Exception as e:
 
@@ -4964,7 +5212,9 @@ def execute_student_query(
 
                 pass
 
-        return {"success": False, "error": f"PostgreSQL Error: {str(e)}"}
+        sanitized_msg = sanitize_db_error_message(e)
+
+        return {"success": False, "error": f"PostgreSQL Error: {sanitized_msg}"}
 
     finally:
 
@@ -5015,6 +5265,48 @@ def extract_table_name_from_ddl(ddl_sql: str) -> Optional[str]:
     )
 
     return match.group(1).lower() if match else None
+
+
+
+def extract_all_table_names_from_ddl(ddl_sql: str) -> List[str]:
+
+    """
+
+    Extracts all table names from one or multiple CREATE TABLE statements.
+
+    Preserves declaration order and filters duplicates.
+
+    """
+
+    if not ddl_sql:
+
+        return []
+
+    matches = re.findall(
+
+        r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[`"]?[a-zA-Z0-9_]+[`"]?\.)?[`"]?([a-zA-Z0-9_]+)[`"]?',
+
+        ddl_sql,
+
+        re.IGNORECASE
+
+    )
+
+    seen = set()
+
+    result = []
+
+    for m in matches:
+
+        m_clean = m.strip().lower()
+
+        if m_clean not in seen:
+
+            seen.add(m_clean)
+
+            result.append(m.strip())
+
+    return result
 
 
 
@@ -5198,83 +5490,61 @@ def inspect_table_catalog(
 
 
 
-def compile_reference_ddl(
-
+def compile_all_reference_ddls(
     expected_ddl_sql: str,
-
     dbname: str = DEFAULT_EXAM_DB
-
 ) -> Dict[str, Any]:
-
     """
-
-    Compiles the lecturer's expected DDL query inside an isolated temporary schema.
-
-    Introspects the generated catalog metadata, and cleanly drops the temporary schema.
-
+    Compiles the lecturer's expected DDL queries inside an isolated temporary schema.
+    Introspects the generated catalog metadata for all declared tables, and cleanly drops the temporary schema.
     Guarantees ZERO schema leaks.
-
     """
-
-    tbl_name = extract_table_name_from_ddl(expected_ddl_sql)
-
-    if not tbl_name:
-
-        return {
-
-            "exists": False,
-
-            "error": "Tidak dapat mendeteksi nama tabel dari kunci acuan DDL dosen."
-
-        }
-
-
+    exp_tables = extract_all_table_names_from_ddl(expected_ddl_sql)
+    if not exp_tables:
+        return {"_error": "Tidak dapat mendeteksi nama tabel dari kunci acuan DDL dosen."}
 
     temp_schema = f"_ref_compile_{uuid.uuid4().hex[:12]}"
-
     conn = get_pg_admin_connection(dbname=dbname)
-
     conn.autocommit = True
-
     cur = conn.cursor()
 
-
-
+    tables_meta = {}
     try:
-
         cur.execute(f"CREATE SCHEMA {temp_schema};")
-
         cur.execute(f"SET search_path TO {temp_schema}, public;")
-
         cur.execute(expected_ddl_sql)
 
-        meta = inspect_table_catalog(temp_schema, tbl_name, conn=conn, dbname=dbname)
+        for tbl in exp_tables:
+            meta = inspect_table_catalog(temp_schema, tbl, conn=conn, dbname=dbname)
+            tables_meta[tbl.lower()] = meta
 
-        return meta
-
+        return tables_meta
     except Exception as e:
-
-        return {
-
-            "exists": False,
-
-            "error": f"Gagal mengeksekusi kunci acuan DDL dosen: {str(e)}"
-
-        }
-
+        return {"_error": f"Gagal mengeksekusi kunci acuan DDL dosen: {str(e)}"}
     finally:
-
         try:
-
             cur.execute(f"DROP SCHEMA IF EXISTS {temp_schema} CASCADE;")
-
         except Exception:
-
             pass
-
         cur.close()
-
         conn.close()
+
+def compile_reference_ddl(
+    expected_ddl_sql: str,
+    dbname: str = DEFAULT_EXAM_DB
+) -> Dict[str, Any]:
+    """
+    Compiles the lecturer's expected DDL query inside an isolated temporary schema.
+    Introspects the generated catalog metadata, and cleanly drops the temporary schema.
+    Guarantees ZERO schema leaks.
+    """
+    all_meta = compile_all_reference_ddls(expected_ddl_sql, dbname=dbname)
+    if "_error" in all_meta:
+        return {"exists": False, "error": all_meta["_error"]}
+    first_tbl = extract_table_name_from_ddl(expected_ddl_sql)
+    if first_tbl and first_tbl.lower() in all_meta:
+        return all_meta[first_tbl.lower()]
+    return list(all_meta.values())[0] if all_meta else {"exists": False, "error": "Metadata kosong."}
 
 
 
@@ -5286,7 +5556,7 @@ def normalize_type_label(col_info: Dict[str, Any]) -> str:
 
     udt = (col_info.get("udt_name") or "").lower()
 
-    
+
 
     if dtype == "CHARACTER VARYING":
 
@@ -5415,208 +5685,180 @@ def compare_table_structures(
 
 
     # 2. Missing columns check
-
     missing = [c for c in exp_cols if c not in stud_cols]
-
     if missing:
-
         details["missing_columns"] = missing
-
-        missing_names = ", ".join(f"'{exp_cols[m]['name']}'" for m in missing)
-
-        msg = f"Struktur tabel '{table_name}' belum lengkap. Kolom berikut belum ditemukan: {missing_names}."
-
+        if EXAM_HINT_MODE == "guided":
+            missing_names = ", ".join(f"'{exp_cols[m]['name']}'" for m in missing)
+            msg = f"Struktur tabel '{table_name}' belum lengkap. Kolom berikut belum ditemukan: {missing_names}."
+        else:
+            msg = f"Struktur tabel '{table_name}' belum lengkap. Masih ada atribut kolom yang diminta pada spesifikasi soal yang belum didefinisikan ke dalam tabel."
         return False, msg, details
 
-
-
     # Extra columns detection (for diagnostic info)
-
     extra = [c for c in stud_cols if c not in exp_cols]
-
     details["extra_columns"] = extra
 
-
-
     # 3. Data type & length/precision compatibility check
-
     INT_FAMILY = {"int4", "int2", "integer", "smallint", "serial"}
-
     BIGINT_FAMILY = {"int8", "bigint", "bigserial"}
 
-
-
     for col_name, exp_c in exp_cols.items():
-
         stud_c = stud_cols[col_name]
-
         exp_dtype = (exp_c.get("data_type") or "").lower()
-
         stud_dtype = (stud_c.get("data_type") or "").lower()
-
         exp_udt = (exp_c.get("udt_name") or "").lower()
-
         stud_udt = (stud_c.get("udt_name") or "").lower()
 
-
-
         type_match = False
-
         if exp_udt and stud_udt and exp_udt == stud_udt:
-
             type_match = True
-
         elif exp_dtype == stud_dtype:
-
             type_match = True
-
         elif exp_udt in INT_FAMILY and stud_udt in INT_FAMILY:
-
             type_match = True
-
         elif exp_udt in BIGINT_FAMILY and stud_udt in BIGINT_FAMILY:
-
             type_match = True
-
         elif exp_dtype in ("character varying", "varchar") and stud_dtype in ("character varying", "varchar"):
-
             type_match = True
-
-
 
         if not type_match:
-
             exp_label = normalize_type_label(exp_c)
-
             stud_label = normalize_type_label(stud_c)
-
             mismatch_desc = f"Kolom '{stud_c['name']}': tipe data tidak sesuai (Diharapkan {exp_label}, tetapi ditemukan {stud_label})."
-
             details["type_mismatches"].append(mismatch_desc)
-
-            return False, mismatch_desc, details
-
-
+            if EXAM_HINT_MODE == "guided":
+                msg = mismatch_desc
+            else:
+                msg = f"Terdapat tipe data tidak sesuai pada definisi atribut tabel '{table_name}'. Periksa kembali kesesuaian tipe data angka atau teks pada rancangan soal."
+            return False, msg, details
 
         # For VARCHAR/CHAR, check maximum length if expected specifies one
-
         if exp_dtype in ("character varying", "character"):
-
             exp_len = exp_c.get("character_maximum_length")
-
             stud_len = stud_c.get("character_maximum_length")
-
             if exp_len is not None and stud_len is not None and exp_len != stud_len:
-
                 mismatch_desc = f"Ukuran panjang kolom '{stud_c['name']}' tidak sesuai. Diharapkan {normalize_type_label(exp_c)}, namun ditemukan {normalize_type_label(stud_c)}."
-
                 details["type_mismatches"].append(mismatch_desc)
-
-                return False, mismatch_desc, details
-
-
-
-        # For NUMERIC/DECIMAL, check precision & scale if expected specifies
-
-        if exp_dtype == "numeric":
-
-            exp_scale = exp_c.get("numeric_scale")
-
-            stud_scale = stud_c.get("numeric_scale")
-
-            if exp_scale is not None and stud_scale is not None and exp_scale != stud_scale:
-
-                mismatch_desc = f"Presisi skala desimal kolom '{stud_c['name']}' tidak sesuai. Diharapkan {normalize_type_label(exp_c)}, namun ditemukan {normalize_type_label(stud_c)}."
-
-                details["type_mismatches"].append(mismatch_desc)
-
-                return False, mismatch_desc, details
-
-
-
-    # 4. Primary Key validation
-
-    exp_pk_cols = [c.lower() for c in expected_meta.get("constraints", {}).get("primary_key", [])]
-
-    stud_pk_cols = [c.lower() for c in student_meta.get("constraints", {}).get("primary_key", [])]
-
-
-
-    if exp_pk_cols:
-
-        if not stud_pk_cols:
-
-            details["pk_status"] = "missing"
-
-            pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
-
-            msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Diharapkan kolom primary key: {pk_names}."
-
-            return False, msg, details
-
-        elif set(exp_pk_cols) != set(stud_pk_cols):
-
-            details["pk_status"] = "mismatch"
-
-            exp_pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
-
-            stud_pk_names = ", ".join(f"'{stud_cols.get(p, {}).get('name', p)}'" for p in stud_pk_cols)
-
-            msg = f"Definisi PRIMARY KEY pada tabel '{table_name}' tidak sesuai. Diharapkan ({exp_pk_names}), namun ditemukan ({stud_pk_names})."
-
-            return False, msg, details
-
-
-
-    # 5. NOT NULL constraint validation (for non-PK columns)
-
-    for col_name, exp_c in exp_cols.items():
-
-        if col_name in exp_pk_cols:
-
-            continue
-
-        if not exp_c.get("is_nullable", True):
-
-            stud_c = stud_cols.get(col_name)
-
-            if stud_c and stud_c.get("is_nullable", True):
-
-                details["nullability_mismatches"].append(col_name)
-
-                msg = f"Kolom '{stud_c['name']}' pada tabel '{table_name}' seharusnya memiliki constraint NOT NULL (tidak boleh bernilai NULL)."
-
+                if EXAM_HINT_MODE == "guided":
+                    msg = mismatch_desc
+                else:
+                    msg = f"Ukuran panjang kolom pada tabel '{table_name}' belum sesuai batas maksimal karakter yang diminta. Periksa kembali alokasi panjang karakter pada klausul VARCHAR/CHAR Anda."
                 return False, msg, details
 
+        # For NUMERIC/DECIMAL, check precision & scale if expected specifies
+        if exp_dtype == "numeric":
+            exp_scale = exp_c.get("numeric_scale")
+            stud_scale = stud_c.get("numeric_scale")
+            if exp_scale is not None and stud_scale is not None and exp_scale != stud_scale:
+                mismatch_desc = f"Presisi skala desimal kolom '{stud_c['name']}' tidak sesuai. Diharapkan {normalize_type_label(exp_c)}, namun ditemukan {normalize_type_label(stud_c)}."
+                details["type_mismatches"].append(mismatch_desc)
+                if EXAM_HINT_MODE == "guided":
+                    msg = mismatch_desc
+                else:
+                    msg = f"Presisi skala desimal kolom pada tabel '{table_name}' belum sesuai spesifikasi angka pada narasi soal."
+                return False, msg, details
 
+    # 4. Primary Key validation
+    exp_pk_cols = [c.lower() for c in expected_meta.get("constraints", {}).get("primary_key", [])]
+    stud_pk_cols = [c.lower() for c in student_meta.get("constraints", {}).get("primary_key", [])]
 
-    msg = f"Sempurna! Struktur tabel '{table_name}' (kolom, tipe data, NOT NULL, dan PRIMARY KEY) 100% valid sesuai spesifikasi acuan dosen."
+    if exp_pk_cols:
+        if not stud_pk_cols:
+            details["pk_status"] = "missing"
+            if EXAM_HINT_MODE == "guided":
+                pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
+                msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Diharapkan kolom primary key: {pk_names}."
+            else:
+                msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Pastikan identitas unik entitas telah ditentukan sebagai primary key."
+            return False, msg, details
+        elif set(exp_pk_cols) != set(stud_pk_cols):
+            details["pk_status"] = "mismatch"
+            if EXAM_HINT_MODE == "guided":
+                exp_pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
+                stud_pk_names = ", ".join(f"'{stud_cols.get(p, {}).get('name', p)}'" for p in stud_pk_cols)
+                msg = f"Definisi PRIMARY KEY pada tabel '{table_name}' tidak sesuai. Diharapkan ({exp_pk_names}), namun ditemukan ({stud_pk_names})."
+            else:
+                msg = f"Definisi batasan constraint PRIMARY KEY pada tabel '{table_name}' belum sesuai rancangan unik entitas. Periksa kembali pemilihan kolom primary key Anda."
+            return False, msg, details
 
+    # 5. NOT NULL constraint validation (for non-PK columns)
+    for col_name, exp_c in exp_cols.items():
+        if col_name in exp_pk_cols:
+            continue
+        if not exp_c.get("is_nullable", True):
+            stud_c = stud_cols.get(col_name)
+            if stud_c and stud_c.get("is_nullable", True):
+                details["nullability_mismatches"].append(col_name)
+                if EXAM_HINT_MODE == "guided":
+                    msg = f"Kolom '{stud_c['name']}' pada tabel '{table_name}' seharusnya memiliki constraint NOT NULL (tidak boleh bernilai NULL)."
+                else:
+                    msg = f"Terdapat atribut wajib pada tabel '{table_name}' yang belum dipasangi constraint NOT NULL. Pastikan kolom yang wajib diisi tidak mengizinkan nilai NULL."
+                return False, msg, details
+
+    # 6. UNIQUE constraint validation (for non-PK columns)
+    exp_uniques = [c.lower() for c in expected_meta.get("constraints", {}).get("unique", [])]
+    stud_uniques = [c.lower() for c in student_meta.get("constraints", {}).get("unique", [])]
+    exp_non_pk_uniques = [c for c in exp_uniques if c not in exp_pk_cols]
+    for u_col in exp_non_pk_uniques:
+        if u_col not in stud_uniques:
+            details["unique_status"] = "missing"
+            if EXAM_HINT_MODE == "guided":
+                u_name = exp_cols.get(u_col, {}).get("name", u_col)
+                msg = f"Kolom '{u_name}' pada tabel '{table_name}' seharusnya memiliki constraint UNIQUE (tidak boleh ada nilai duplikat)."
+            else:
+                msg = f"Tabel '{table_name}' belum memiliki constraint UNIQUE yang dipersyaratkan. Pastikan atribut kontak/data yang tidak boleh bernilai ganda telah dipasangi batasan unik."
+            return False, msg, details
+
+    # 7. FOREIGN KEY constraint validation
+    exp_fks = [c.lower() for c in expected_meta.get("constraints", {}).get("foreign_keys", [])]
+    stud_fks = [c.lower() for c in student_meta.get("constraints", {}).get("foreign_keys", [])]
+    for fk_col in exp_fks:
+        if fk_col not in stud_fks:
+            details["fk_status"] = "missing"
+            if EXAM_HINT_MODE == "guided":
+                fk_name = exp_cols.get(fk_col, {}).get("name", fk_col)
+                msg = f"Kolom '{fk_name}' pada tabel '{table_name}' seharusnya memiliki constraint FOREIGN KEY yang mereferensikan tabel induk."
+            else:
+                msg = f"Relasi integritas referensial constraint FOREIGN KEY pada tabel '{table_name}' belum terpasang dengan benar. Periksa kembali foreign key yang mengaitkan ke tabel induk."
+            return False, msg, details
+
+    msg = f"Sempurna! Struktur tabel '{table_name}' (kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY) 100% valid sesuai spesifikasi acuan dosen."
     return True, msg, details
 
 
 
 
 
+_SCHEMA_CACHE: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+_SCHEMA_CACHE_LOCK = threading.Lock()
+
+def invalidate_schema_cache(db_name: Optional[str] = None):
+    """Invalidates the in-memory schema metadata cache."""
+    with _SCHEMA_CACHE_LOCK:
+        if db_name:
+            _SCHEMA_CACHE.pop(db_name.strip().lower(), None)
+        else:
+            _SCHEMA_CACHE.clear()
+
 def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
-
     """
-
-    Introspects tables and columns dynamically.
-
+    Introspects tables and columns dynamically with in-memory caching.
     - If db_name == 'sandbox_pribadi', inspects the student's personal schema (sandbox_{nim}).
-
-    - Otherwise, inspects public tables of the selected PostgreSQL database (pagila, classicmodels, etc.).
-
+    - Otherwise, inspects public tables of the selected PostgreSQL database (pagila, classicmodels, etc.) and caches results.
     Returns: { "table_name": [{"name": col, "type": type, "nullable": bool, "pk": bool}] }
-
     """
-
     schema_info = {}
-
     clean_db = (db_name or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
+    if clean_db not in ALLOWED_STUDENT_DBS:
+        clean_db = DEFAULT_EXAM_DB
 
     is_sandbox = (clean_db == "sandbox_pribadi")
+
+    if not is_sandbox:
+        with _SCHEMA_CACHE_LOCK:
+            if clean_db in _SCHEMA_CACHE:
+                return _SCHEMA_CACHE[clean_db]
 
     conn = None
 
@@ -5632,7 +5874,7 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
 
             cur.execute("""
 
-                SELECT 
+                SELECT
 
                     c.table_name,
 
@@ -5648,31 +5890,33 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
 
                 FROM information_schema.columns c
 
-                JOIN information_schema.tables t 
+                JOIN information_schema.tables t
 
-                    ON c.table_name = t.table_name 
+                    ON c.table_name = t.table_name
 
                     AND c.table_schema = t.table_schema
 
                 LEFT JOIN information_schema.key_column_usage kcu
 
-                    ON c.table_name = kcu.table_name 
+                    ON c.table_name = kcu.table_name
 
-                    AND c.column_name = kcu.column_name 
+                    AND c.column_name = kcu.column_name
 
                     AND c.table_schema = kcu.table_schema
 
-                LEFT JOIN information_schema.table_constraints tc 
+                LEFT JOIN information_schema.table_constraints tc
 
-                    ON kcu.constraint_name = tc.constraint_name 
+                    ON kcu.constraint_name = tc.constraint_name
 
-                    AND kcu.table_schema = tc.table_schema 
+                    AND kcu.table_schema = tc.table_schema
 
                     AND tc.constraint_type = 'PRIMARY KEY'
 
                 WHERE c.table_schema = %s
 
                   AND t.table_type = 'BASE TABLE'
+
+                  AND c.table_name NOT IN (SELECT relname FROM pg_class WHERE relispartition = true)
 
                 ORDER BY c.table_name, c.ordinal_position;
 
@@ -5686,7 +5930,7 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
 
             cur.execute("""
 
-                SELECT 
+                SELECT
 
                     c.table_name,
 
@@ -5702,39 +5946,39 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
 
                 FROM information_schema.columns c
 
-                JOIN information_schema.tables t 
+                JOIN information_schema.tables t
 
-                    ON c.table_name = t.table_name 
+                    ON c.table_name = t.table_name
 
                     AND c.table_schema = t.table_schema
 
                 LEFT JOIN information_schema.key_column_usage kcu
 
-                    ON c.table_name = kcu.table_name 
+                    ON c.table_name = kcu.table_name
 
-                    AND c.column_name = kcu.column_name 
+                    AND c.column_name = kcu.column_name
 
                     AND c.table_schema = kcu.table_schema
 
-                LEFT JOIN information_schema.table_constraints tc 
+                LEFT JOIN information_schema.table_constraints tc
 
-                    ON kcu.constraint_name = tc.constraint_name 
+                    ON kcu.constraint_name = tc.constraint_name
 
-                    AND kcu.table_schema = tc.table_schema 
+                    AND kcu.table_schema = tc.table_schema
 
                     AND tc.constraint_type = 'PRIMARY KEY'
 
-                WHERE c.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-
-                  AND c.table_schema NOT LIKE 'pg_%%'
+                WHERE c.table_schema = 'public'
 
                   AND t.table_type = 'BASE TABLE'
+
+                  AND c.table_name NOT IN (SELECT relname FROM pg_class WHERE relispartition = true)
 
                 ORDER BY c.table_schema, c.table_name, c.ordinal_position;
 
             """)
 
-        
+
 
         rows = cur.fetchall()
 
@@ -5750,13 +5994,13 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
 
             is_pk = bool(r[4])
 
-            
+
 
             if tbl not in schema_info:
 
                 schema_info[tbl] = []
 
-            
+
 
             if not any(item["name"] == col for item in schema_info[tbl]):
 
@@ -5773,170 +6017,101 @@ def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = Non
                 })
 
         cur.close()
-
         conn.close()
 
+        if not is_sandbox and schema_info:
+            with _SCHEMA_CACHE_LOCK:
+                _SCHEMA_CACHE[clean_db] = schema_info
+
     except Exception as e:
-
         if conn and not conn.closed:
-
             conn.close()
-
         print(f"Error inspecting schema for db '{clean_db}': {e}")
 
     return schema_info
 
 
-
-def get_database_fk_relations(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = None) -> list:
-
-    """Returns all foreign key relationships in the specified database or student sandbox."""
-
-    relations = []
-
+def get_table_data(db_name: str, table_name: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    """
+    Fetches actual row data from a specific table in PostgreSQL for admin data inspection.
+    Safely escapes identifiers, counts total rows, and serializes datatypes to JSON.
+    """
     clean_db = (db_name or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
+    if clean_db not in ALLOWED_STUDENT_DBS:
+        clean_db = DEFAULT_EXAM_DB
 
-    is_sandbox = (clean_db == "sandbox_pribadi")
+    clean_tbl = (table_name or "").strip().lower()
+    if not re.match(r'^[a-z0-9_]+$', clean_tbl):
+        raise ValueError(f"Nama tabel '{table_name}' tidak valid.")
 
-    conn = None
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
 
+    conn = get_pg_admin_connection(dbname=clean_db)
     try:
+        cur = conn.cursor()
+        count_query = sql.SQL("SELECT COUNT(*) FROM {};").format(sql.Identifier(clean_tbl))
+        cur.execute(count_query)
+        total_rows = cur.fetchone()[0]
 
-        if is_sandbox:
+        data_query = sql.SQL("SELECT * FROM {} LIMIT %s OFFSET %s;").format(sql.Identifier(clean_tbl))
+        cur.execute(data_query, (limit, offset))
 
-            schema_name = get_clean_student_schema_name(nim)
+        col_names = [desc[0] for desc in cur.description] if cur.description else []
+        raw_rows = cur.fetchall()
 
-            conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
-            cur = conn.cursor()
-
-            cur.execute("""
-
-                SELECT
-
-                    kcu.table_name        AS from_table,
-
-                    kcu.column_name       AS from_col,
-
-                    ccu.table_name        AS to_table,
-
-                    ccu.column_name       AS to_col,
-
-                    tc.constraint_name
-
-                FROM information_schema.table_constraints AS tc
-
-                JOIN information_schema.key_column_usage AS kcu
-
-                    ON tc.constraint_name = kcu.constraint_name
-
-                    AND tc.table_schema   = kcu.table_schema
-
-                JOIN information_schema.constraint_column_usage AS ccu
-
-                    ON ccu.constraint_name = tc.constraint_name
-
-                    AND ccu.table_schema   = tc.table_schema
-
-                WHERE tc.constraint_type = 'FOREIGN KEY'
-
-                  AND tc.table_schema = %s
-
-                ORDER BY from_table, from_col;
-
-            """, (schema_name,))
-
-        else:
-
-            conn = get_pg_admin_connection(dbname=clean_db)
-
-            cur = conn.cursor()
-
-            cur.execute("""
-
-                SELECT
-
-                    kcu.table_name        AS from_table,
-
-                    kcu.column_name       AS from_col,
-
-                    ccu.table_name        AS to_table,
-
-                    ccu.column_name       AS to_col,
-
-                    tc.constraint_name
-
-                FROM information_schema.table_constraints AS tc
-
-                JOIN information_schema.key_column_usage AS kcu
-
-                    ON tc.constraint_name = kcu.constraint_name
-
-                    AND tc.table_schema   = kcu.table_schema
-
-                JOIN information_schema.constraint_column_usage AS ccu
-
-                    ON ccu.constraint_name = tc.constraint_name
-
-                    AND ccu.table_schema   = tc.table_schema
-
-                WHERE tc.constraint_type = 'FOREIGN KEY'
-
-                  AND tc.table_schema NOT IN ('information_schema', 'pg_catalog')
-
-                  AND tc.table_schema NOT LIKE 'pg_%%'
-
-                ORDER BY from_table, from_col;
-
-            """)
-
-            
-
-        for row in cur.fetchall():
-
-            relations.append({
-
-                "from_table": row[0],
-
-                "from_col":   row[1],
-
-                "to_table":   row[2],
-
-                "to_col":     row[3],
-
-                "constraint":  row[4],
-
-            })
+        serialized_rows = []
+        for row in raw_rows:
+            formatted_row = []
+            for cell in row:
+                if cell is None:
+                    formatted_row.append(None)
+                elif isinstance(cell, (datetime.datetime, datetime.date, datetime.time, dt_time)):
+                    formatted_row.append(str(cell))
+                elif isinstance(cell, decimal.Decimal):
+                    formatted_row.append(float(cell))
+                elif isinstance(cell, (bytes, memoryview)):
+                    formatted_row.append(f"<binary {len(cell)} bytes>")
+                elif isinstance(cell, (dict, list)):
+                    formatted_row.append(json.dumps(cell))
+                else:
+                    s_val = str(cell)
+                    if len(s_val) > 1000:
+                        s_val = s_val[:1000] + "..."
+                    formatted_row.append(s_val)
+            serialized_rows.append(formatted_row)
 
         cur.close()
-
         conn.close()
 
+        return {
+            "database": clean_db,
+            "table": clean_tbl,
+            "columns": col_names,
+            "rows": serialized_rows,
+            "total_rows": total_rows,
+            "limit": limit,
+            "offset": offset
+        }
     except Exception as e:
-
         if conn and not conn.closed:
-
             conn.close()
+        raise e
 
-        print(f"Error fetching FK relations for db '{clean_db}': {e}")
 
-    return relations
-
+def get_database_fk_relations(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = None) -> list:
+    """Legacy ERD stub - ERD visualizer removed per Subtask 4.2."""
+    return []
 
 
 def get_classicmodels_schema() -> Dict[str, List[Dict[str, Any]]]:
-
     """Backward compatibility wrapper."""
-
     return get_database_schema(db_name="classicmodels")
 
 
-
 def get_classicmodels_fk_relations() -> list:
-
-    """Backward compatibility wrapper."""
-
-    return get_database_fk_relations(db_name="classicmodels")
+    """Legacy ERD stub - ERD visualizer removed per Subtask 4.2."""
+    return []
 
 
 
@@ -5946,7 +6121,7 @@ def verify_system_health() -> Dict[str, Any]:
 
     health = {"sqlite": False, "postgres_admin": False, "postgres_student": False, "details": {}}
 
-    
+
 
     # SQLite check
 
@@ -6171,122 +6346,3 @@ def mark_student_in_exam(nim: str) -> None:
         )
 
     conn.close()
-
-
-
-def get_waiting_room_messages(since_id: int = 0, limit: int = 50) -> list:
-
-    """Returns chat messages newer than since_id, or the latest `limit` messages when since_id=0."""
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    if since_id > 0:
-
-        cur.execute(
-
-            """
-
-            SELECT id, nim, name, message, sent_at
-
-            FROM waiting_room_messages
-
-            WHERE id > ?
-
-            ORDER BY id ASC
-
-            LIMIT ?;
-
-            """,
-
-            (since_id, limit)
-
-        )
-
-        rows = cur.fetchall()
-
-    else:
-
-        cur.execute(
-
-            """
-
-            SELECT id, nim, name, message, sent_at
-
-            FROM (
-
-                SELECT id, nim, name, message, sent_at
-
-                FROM waiting_room_messages
-
-                ORDER BY id DESC
-
-                LIMIT ?
-
-            )
-
-            ORDER BY id ASC;
-
-            """,
-
-            (limit,)
-
-        )
-
-        rows = cur.fetchall()
-
-    conn.close()
-
-    return [dict(r) for r in rows]
-
-
-
-def post_waiting_room_message(nim: str, name: str, message: str) -> dict:
-
-    """Inserts a new chat message and returns it."""
-
-    message = message.strip()[:300]
-
-    if not message:
-
-        return {}
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        cur = conn.cursor()
-
-        cur.execute(
-
-            "INSERT INTO waiting_room_messages (nim, name, message) VALUES (?, ?, ?);",
-
-            (nim, name, message)
-
-        )
-
-        msg_id = cur.lastrowid
-
-    cur.execute("SELECT id, nim, name, message, sent_at FROM waiting_room_messages WHERE id = ?;", (msg_id,))
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    return dict(row) if row else {}
-
-
-
-def clear_waiting_room_messages() -> None:
-
-    """Clears all waiting room chat messages (called when exam starts)."""
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute("DELETE FROM waiting_room_messages;")
-
-    conn.close()
-

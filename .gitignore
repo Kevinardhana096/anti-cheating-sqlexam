@@ -16,7 +16,11 @@ ENV/
 
 # Database files
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Operating System files
 .DS_Store
@@ -29,3 +33,6 @@ Desktop.ini
 
 # Scratch and test artifacts
 scratch/
+
+# Raw Pagila zip extractions (keep data/pagila-schema.sql and data/pagila-data.sql)
+data/pagila-*/
