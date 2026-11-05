@@ -149,7 +149,8 @@ def get_allowed_databases() -> List[Dict[str, Any]]:
 
 
 def get_sqlite_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(SQLITE_DB_PATH, timeout=30.0)
+    db_path = os.environ.get("EXAM_SQLITE_PATH", SQLITE_DB_PATH)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -358,29 +359,62 @@ def init_system_db():
             except Exception:
                 pass
 
-        # Seed default exam packages if empty
-        cur.execute("SELECT COUNT(*) FROM exam_packages;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("SELECT DISTINCT category FROM questions WHERE category IS NOT NULL AND category != '';")
-            cats = [r[0].strip().upper() for r in cur.fetchall() if r[0]]
-            if not cats:
-                cats = ["A", "B"]
-            for cat in sorted(set(cats)):
+        # Check if initial system seeding has been completed or marked
+        cur.execute("SELECT value FROM system_settings WHERE key = 'initial_seed_completed';")
+        seed_row = cur.fetchone()
+
+        if seed_row is None:
+            # Check if this database has already been configured or used by an admin
+            cur.execute("SELECT COUNT(*) FROM exam_packages;")
+            pkg_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM questions;")
+            q_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM exam_logs WHERE action_type IN ('create_package', 'delete_package', 'reset_all', 'delete_question', 'save_question');")
+            admin_activity_count = cur.fetchone()[0]
+
+            if pkg_count > 0 or q_count > 0 or admin_activity_count > 0:
+                # Existing database already touched by admin -> mark as completed so we NEVER seed dummy questions
                 cur.execute(
-                    "INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES (?, ?, ?, 1);",
-                    (cat, f"Paket {cat}", f"Paket Soal Ujian Praktikum Basis Data {cat}")
+                    """
+                    INSERT INTO system_settings (key, value) VALUES ('initial_seed_completed', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                    """
                 )
+                conn.commit()
+                is_seed_completed = True
+            else:
+                is_seed_completed = False
+        else:
+            is_seed_completed = (str(seed_row[0]).strip() == "1")
+
+        if not is_seed_completed:
+            # Seed default exam packages only if truly a fresh install and not yet configured
+            cur.execute("SELECT COUNT(*) FROM exam_packages;")
+            if cur.fetchone()[0] == 0:
+                cur.execute("SELECT DISTINCT category FROM questions WHERE category IS NOT NULL AND category != '';")
+                cats = [r[0].strip().upper() for r in cur.fetchall() if r[0]]
+                if not cats:
+                    cats = ["A", "B"]
+                for cat in sorted(set(cats)):
+                    cur.execute(
+                        "INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES (?, ?, ?, 1);",
+                        (cat, f"Paket {cat}", f"Paket Soal Ujian Praktikum Basis Data {cat}")
+                    )
+                conn.commit()
+
+            # Seed initial exam questions only if truly a fresh install
+            cur.execute("SELECT COUNT(*) FROM questions;")
+            if cur.fetchone()[0] == 0:
+                seed_default_questions(conn)
+
+            # Mark initial seeding as permanently completed
+            cur.execute(
+                """
+                INSERT INTO system_settings (key, value) VALUES ('initial_seed_completed', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1';
+                """
+            )
             conn.commit()
-
-
-
-        # Seed initial exam questions if empty
-
-        cur.execute("SELECT COUNT(*) FROM questions;")
-
-        if cur.fetchone()[0] == 0:
-
-            seed_default_questions(conn)
 
 
 

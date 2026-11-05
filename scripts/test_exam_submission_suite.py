@@ -121,6 +121,8 @@ INSERT INTO hewan (id_hewan, nama_hewan, spesies, id_pemilik) VALUES
             cur = conn.cursor()
             cur.execute("DELETE FROM submissions WHERE user_id IN (SELECT id FROM users WHERE nim = ?);", (cls.test_nim,))
             cur.execute("DELETE FROM users WHERE nim = ?;", (cls.test_nim,))
+            cur.execute("DELETE FROM questions WHERE category = 'FINAL-A';")
+            cur.execute("DELETE FROM exam_packages WHERE code = 'FINAL-A';")
         conn.close()
 
     def clean_student_sandbox(self):
