@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portal Pengawas - Ujian Praktikum Basis Data</title>
+    <title>Admin Ujian - Login</title>
     <script>(function(){var t=localStorage.getItem("exam_global_theme")||"dracula";document.documentElement.setAttribute("data-theme",t);})();</script>
     <link rel="stylesheet" href="/static/css/style.css?v=20261101_v5">
     <style>
@@ -15,7 +15,7 @@
         .alp-badge-text{font-size:.72rem;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.08em;}
         .alp-title{font-size:1.3rem;font-weight:700;color:var(--text-main);margin-bottom:.25rem;}
         .alp-sub{font-size:.83rem;color:var(--text-muted);}
-        .alp-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:2rem;box-shadow:0 8px 30px rgba(0,0,0,.25);}
+        .alp-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:2rem;box-shadow:0 4px 16px rgba(0,0,0,.15);}
         .alp-back{text-align:center;margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--border-subtle);}
         .alp-back a{font-size:.82rem;color:var(--accent);text-decoration:none;transition:opacity .15s;display:inline-flex;align-items:center;gap:.3rem;}
         .alp-back a:hover{opacity:.75;}
@@ -27,10 +27,10 @@
         <div class="alp-top">
             <div class="alp-badge">
                 <span class="alp-badge-dot"></span>
-                <span class="alp-badge-text">Admin Panel</span>
+                <span class="alp-badge-text">Admin Ujian</span>
             </div>
-            <h1 class="alp-title">Portal Dosen &amp; Pengawas</h1>
-            <p class="alp-sub">Masukkan master key untuk mengelola sesi ujian.</p>
+            <h1 class="alp-title">Admin Ujian</h1>
+            <p class="alp-sub">Masukkan master key pengawas.</p>
         </div>
 
         <div class="alp-card">
@@ -40,21 +40,21 @@
 
             <form method="POST" action="/admin/login" id="admin-login-form">
                 <div class="form-group">
-                    <label for="master_key" class="form-label">Master Key Dosen</label>
+                    <label for="master_key" class="form-label">Master Key</label>
                     <input type="password" id="master_key" name="master_key"
                         class="form-input" placeholder="Masukkan master key..."
                         required autofocus aria-describedby="key-hint">
-                    <div id="key-hint" style="font-size:.73rem;color:var(--text-muted);margin-top:.3rem;">Key ini ditetapkan oleh administrator sistem.</div>
+                    <div id="key-hint" style="font-size:.73rem;color:var(--text-muted);margin-top:.3rem;">Ditetapkan oleh administrator sistem.</div>
                 </div>
                 <button type="submit" class="btn btn-primary" style="width:100%;padding:.7rem;font-size:.9rem;" id="btn-admin-login">
-                    Masuk ke Dashboard Pengawas
+                    Masuk
                 </button>
             </form>
 
             <div class="alp-back">
                 <a href="/login">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;"><polyline points="15 18 9 12 15 6"/></svg>
-                    Kembali ke Login Mahasiswa
+                    Kembali ke Login
                 </a>
             </div>
         </div>
