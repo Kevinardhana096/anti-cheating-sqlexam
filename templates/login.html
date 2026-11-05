@@ -119,6 +119,7 @@
             {% endif %}
 
             <form method="POST" action="/login" id="login-form" novalidate>
+                <input type="hidden" id="login-device-id" name="device_id" value="">
                 <div class="form-group">
                     <label for="nim" class="form-label">NIM (Nomor Induk Mahasiswa)</label>
                     <input type="text" id="nim" name="nim" class="form-input"
@@ -155,5 +156,28 @@
         </div>
     </div>
 </div>
+<script>
+(function() {
+    try {
+        var devIdKey = "exam_client_device_id";
+        var devId = localStorage.getItem(devIdKey);
+        if (!devId || devId.length < 8) {
+            if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+                devId = crypto.randomUUID();
+            } else {
+                devId = 'dev-' + Math.random().toString(36).substring(2, 15) + '-' + Date.now();
+            }
+            localStorage.setItem(devIdKey, devId);
+        }
+        var hiddenInput = document.getElementById("login-device-id");
+        if (hiddenInput) {
+            hiddenInput.value = devId;
+        }
+        document.cookie = "device_id=" + encodeURIComponent(devId) + "; path=/; max-age=604800; SameSite=Lax";
+    } catch (e) {
+        console.error("Device ID initialization error:", e);
+    }
+})();
+</script>
 </body>
 </html>

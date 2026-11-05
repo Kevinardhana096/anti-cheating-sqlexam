@@ -45,6 +45,50 @@ class ExamSubmissionTestSuite(unittest.TestCase):
         cls.client.cookies.set("student_token", cls.session_token)
         cls.client.cookies.set("student_nim", cls.test_nim)
 
+        # Ensure exam package and exact test fixture questions for FINAL-A exist
+        conn = database.get_sqlite_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES ('FINAL-A', 'Paket Final A', 'Paket Final A Testing', 1);")
+        test_fixture_questions = [
+            (1, "Membuat Tabel Pemilik dan Hewan", "Buat tabel pemilik dan hewan...", 5,
+             """CREATE TABLE pemilik (
+    id_pemilik INT PRIMARY KEY,
+    nama_pemilik VARCHAR(50) NOT NULL,
+    no_telepon VARCHAR(15) UNIQUE NOT NULL
+);
+CREATE TABLE hewan (
+    id_hewan INT PRIMARY KEY,
+    nama_hewan VARCHAR(50) NOT NULL,
+    spesies VARCHAR(30) NOT NULL,
+    id_pemilik INT,
+    CONSTRAINT fk_pemilik FOREIGN KEY (id_pemilik) REFERENCES pemilik(id_pemilik)
+);""", "sandbox_pribadi", "Easy"),
+            (2, "Memasukkan Data Pemilik dan Hewan", "Masukkan data...", 5,
+             """INSERT INTO pemilik (id_pemilik, nama_pemilik, no_telepon) VALUES
+(1, 'Budi Santoso', '081234567890'),
+(2, 'Siti Rahma', '081298765432');
+INSERT INTO hewan (id_hewan, nama_hewan, spesies, id_pemilik) VALUES
+(101, 'Milo', 'Kucing', 1),
+(102, 'Bleki', 'Anjing', 2);""", "sandbox_pribadi", "Easy"),
+            (3, "Menampilkan Hewan dan Pemilik", "Tampilkan hewan...", 5,
+             "SELECT h.id_hewan, h.nama_hewan, h.spesies, p.nama_pemilik FROM hewan h JOIN pemilik p ON h.id_pemilik = p.id_pemilik ORDER BY h.id_hewan ASC;", "sandbox_pribadi", "Easy"),
+            (4, "Aktor Terproduktif", "Tampilkan aktor...", 10,
+             "SELECT a.actor_id, CONCAT(a.first_name, ' ', a.last_name) AS nama_lengkap_aktor, COUNT(f.film_id) AS total_film FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film f ON fa.film_id = f.film_id GROUP BY a.actor_id, a.first_name, a.last_name HAVING COUNT(f.film_id) > 35 ORDER BY total_film DESC;", "pagila", "Medium"),
+            (5, "Pelanggan Rental di Atas Rata-Rata", "Tampilkan pelanggan...", 20,
+             "SELECT c.customer_id, c.first_name, c.last_name, COUNT(r.rental_id) AS total_rental FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id, c.first_name, c.last_name HAVING COUNT(r.rental_id) > (SELECT AVG(rental_count) FROM (SELECT COUNT(rental_id) AS rental_count FROM rental GROUP BY customer_id) AS avg_rentals) ORDER BY total_rental DESC LIMIT 10;", "pagila", "Hard")
+        ]
+        for qnum, title, desc, weight, query, target_db, diff in test_fixture_questions:
+            cur.execute("""
+                INSERT INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level)
+                VALUES (?, ?, ?, ?, ?, 'FINAL-A', ?, ?)
+                ON CONFLICT(category, question_number) DO UPDATE SET
+                    expected_query = excluded.expected_query,
+                    score_weight = excluded.score_weight,
+                    target_database = excluded.target_database,
+                    title = excluded.title;
+            """, (qnum, title, desc, weight, query, target_db, diff))
+        conn.commit()
+
         # Select category 'FINAL-A'
         res_cat = cls.client.post("/api/student/select-category", json={
             "nim": cls.test_nim,
@@ -54,8 +98,6 @@ class ExamSubmissionTestSuite(unittest.TestCase):
         assert res_cat.status_code == 200, f"Select category failed: {res_cat.text}"
 
         # Fetch questions for FINAL-A
-        conn = database.get_sqlite_conn()
-        cur = conn.cursor()
         cur.execute("SELECT * FROM questions WHERE category = 'FINAL-A' ORDER BY question_number ASC;")
         cls.questions = {r["question_number"]: dict(r) for r in cur.fetchall()}
         conn.close()
@@ -668,7 +710,7 @@ class ExamSubmissionTestSuite(unittest.TestCase):
         self.clean_student_sandbox()
 
         total_earned = 0
-        total_possible = sum(q["score_weight"] for q in self.questions.values())
+        total_possible = sum(self.questions[i]["score_weight"] for i in range(1, 6))
 
         # Submit Question 1
         res1 = self.client.post("/api/student/submit", json={

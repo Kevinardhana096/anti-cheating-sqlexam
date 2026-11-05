@@ -271,7 +271,8 @@ def index_route(request: Request):
     if token and nim:
         is_valid, user, _ = database.validate_student_session(nim, token, client_ip)
         if is_valid:
-            return RedirectResponse(url="/waiting", status_code=status.HTTP_302_FOUND)
+            target_url = "/exam" if database.get_exam_state() == "active" else "/waiting"
+            return RedirectResponse(url=target_url, status_code=status.HTTP_302_FOUND)
 
     return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
 
@@ -287,7 +288,8 @@ def login_page(request: Request, error: Optional[str] = None, message: Optional[
 def handle_login(
     request: Request,
     nim: str = Form(""),
-    name: str = Form("")
+    name: str = Form(""),
+    device_id: Optional[str] = Form(None)
 ):
     verify_csrf_origin(request)
     client_ip = get_client_ip(request)
@@ -306,10 +308,10 @@ def handle_login(
             context={"error": "NIM dan Nama Lengkap wajib diisi!", "nim_value": nim, "name_value": name}
         )
 
-    client_ip = get_client_ip(request)
+    effective_device_id = (device_id or "").strip() or request.cookies.get("device_id")
     new_session_token = str(uuid.uuid4())
 
-    success, user, error_msg = database.login_student(nim, name, client_ip, new_session_token)
+    success, user, error_msg = database.login_student(nim, name, client_ip, new_session_token, effective_device_id)
 
     if not success:
         return templates.TemplateResponse(
@@ -318,9 +320,12 @@ def handle_login(
             context={"error": error_msg, "nim_value": nim, "name_value": name}
         )
 
-    response = RedirectResponse(url="/waiting", status_code=status.HTTP_302_FOUND)
+    target_url = "/exam" if database.get_exam_state() == "active" else "/waiting"
+    response = RedirectResponse(url=target_url, status_code=status.HTTP_302_FOUND)
     set_secure_cookie(response, "student_token", new_session_token, request)
     set_secure_cookie(response, "student_nim", nim, request)
+    if effective_device_id:
+        set_secure_cookie(response, "device_id", effective_device_id, request)
     return response
 
 @app.get("/waiting", response_class=HTMLResponse)
@@ -708,25 +713,20 @@ def api_admin_kick_student(req: KickStudentRequest, request: Request):
     if not verify_admin_auth(request):
         raise HTTPException(status_code=403, detail="Akses ditolak")
 
-    conn = database.get_sqlite_conn()
-    with conn:
-        conn.execute(
-            """
-            UPDATE users
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline'
-            WHERE nim = ?;
-            """,
-            (req.nim,)
-        )
-        conn.execute(
-            """
-            INSERT INTO exam_logs (action_type, details)
-            VALUES ('kick', ?);
-            """,
-            (f"Pengawas me-reset sesi untuk NIM {req.nim}",)
-        )
-    conn.close()
-    return {"status": "success", "message": f"Sesi mahasiswa {req.nim} telah direset."}
+    success, msg = database.clear_student_session_lock(req.nim)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+@app.post("/api/admin/clear-session-lock")
+def api_admin_clear_session_lock(req: KickStudentRequest, request: Request):
+    if not verify_admin_auth(request):
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+
+    success, msg = database.clear_student_session_lock(req.nim)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
 
 @app.post("/api/admin/stop-all-sessions")
 def api_admin_stop_all_sessions(request: Request):

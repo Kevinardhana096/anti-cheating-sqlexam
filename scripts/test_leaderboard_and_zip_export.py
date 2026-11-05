@@ -80,9 +80,25 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
             cur.execute(f"DELETE FROM submissions WHERE user_id IN (SELECT id FROM users WHERE nim IN ({','.join('?' for _ in test_nims)}));", test_nims)
             cur.execute(f"DELETE FROM users WHERE nim IN ({','.join('?' for _ in test_nims)});", test_nims)
 
+            # Ensure questions for FINAL-A only include the 5 standard questions (total 45 pts)
+            cur.execute("DELETE FROM questions WHERE category = 'FINAL-A' AND question_number > 5;")
+            conn.commit()
+
             # Map question numbers to question IDs for FINAL-A
             cur.execute("SELECT id, question_number, score_weight FROM questions WHERE category = 'FINAL-A' ORDER BY question_number ASC;")
             cls.q_map = {r["question_number"]: dict(r) for r in cur.fetchall()}
+            if not cls.q_map:
+                import seeder_draf_final_2026
+                cur.execute("INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES ('FINAL-A', 'Paket Final A', 'Paket Final A Testing', 1);")
+                final_a_pkg = next(p for p in seeder_draf_final_2026.PACKAGES_DATA if p["code"] == "FINAL-A")
+                for q in final_a_pkg["questions"]:
+                    cur.execute("""
+                        INSERT OR IGNORE INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level)
+                        VALUES (?, ?, ?, ?, ?, 'FINAL-A', ?, ?);
+                    """, (q["num"], q["title"], q["desc"], q["weight"], q["query"], q["target_db"], q["diff"]))
+                conn.commit()
+                cur.execute("SELECT id, question_number, score_weight FROM questions WHERE category = 'FINAL-A' ORDER BY question_number ASC;")
+                cls.q_map = {r["question_number"]: dict(r) for r in cur.fetchall()}
 
             # Insert users and submissions
             cls.user_ids = {}

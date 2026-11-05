@@ -62,6 +62,19 @@ class ScoreRetentionTestSuite(unittest.TestCase):
 
         # Get Question 1 and Question 4 from FINAL-A
         questions = database.get_questions_by_category("FINAL-A")
+        if not questions:
+            import seeder_draf_final_2026
+            conn_seed = database.get_sqlite_conn()
+            with conn_seed:
+                conn_seed.execute("INSERT OR IGNORE INTO exam_packages (code, name, description, is_active) VALUES ('FINAL-A', 'Paket Final A', 'Paket Final A Testing', 1);")
+                final_a_pkg = next(p for p in seeder_draf_final_2026.PACKAGES_DATA if p["code"] == "FINAL-A")
+                for q in final_a_pkg["questions"]:
+                    conn_seed.execute("""
+                        INSERT OR IGNORE INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level)
+                        VALUES (?, ?, ?, ?, ?, 'FINAL-A', ?, ?);
+                    """, (q["num"], q["title"], q["desc"], q["weight"], q["query"], q["target_db"], q["diff"]))
+            conn_seed.close()
+            questions = database.get_questions_by_category("FINAL-A")
         cls.q1 = next((q for q in questions if q.get("question_number") == 1), None)
         cls.q4 = next((q for q in questions if q.get("question_number") == 4), None)
         assert cls.q1 is not None, "Soal No. 1 Paket FINAL-A harus ada"

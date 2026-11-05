@@ -613,19 +613,12 @@ async function loadDashboardData() {
                     <td>${cheatBadge}</td>
 
                     <td style="text-align: right; white-space: nowrap;">
-
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="kickStudent('${escapeHtml(s.nim)}')" title="Tendang sesi untuk memaksa login ulang">
-
-                            Reset Sesi
-
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="clearStudentSessionLock('${escapeHtml(s.nim)}', '${escapeHtml(s.name)}')" title="Bebaskan kunci sesi perangkat agar mahasiswa dapat login kembali tanpa kehilangan data">
+                            Bebaskan Sesi
                         </button>
-
                         <button type="button" class="btn btn-warning btn-sm" style="margin-left: 0.35rem;" onclick="resetStudentCategory('${escapeHtml(s.nim)}', '${escapeHtml(s.name)}')" title="Reset pilihan paket soal mahasiswa agar dapat memilih ulang">
-
                             Reset Paket
-
                         </button>
-
                     </td>
 
                 </tr>
@@ -686,34 +679,30 @@ async function resetStudentCategory(nim, name) {
 
 
 
-async function kickStudent(nim) {
-
-    if (!confirm(`Apakah Anda yakin ingin me-reset sesi mahasiswa dengan NIM: ${nim}?`)) return;
+async function clearStudentSessionLock(nim, name) {
+    const studentLabel = name ? `${name} (${nim})` : nim;
+    if (!confirm(`Bebaskan kunci sesi perangkat untuk mahasiswa ${studentLabel}?\n\nMahasiswa dapat langsung login kembali (misal jika perangkat restart atau ganti laptop) tanpa kehilangan jawaban yang telah disubmit.`)) return;
 
     try {
-
-        const res = await fetch("/api/admin/kick-student", {
-
+        const res = await fetch("/api/admin/clear-session-lock", {
             method: "POST",
-
             headers: { "Content-Type": "application/json" },
-
             body: JSON.stringify({ nim: nim })
-
         });
-
         const data = await res.json();
-
-        showToast(data.message || "Sesi berhasil direset.");
-
-        loadDashboardData();
-
+        if (res.ok && data.status === "success") {
+            showToast(data.message || `Kunci sesi untuk NIM ${nim} berhasil dibebaskan.`);
+            loadDashboardData();
+        } else {
+            showToast(data.detail || data.message || "Gagal membebaskan kunci sesi mahasiswa.", "danger");
+        }
     } catch (err) {
-
-        showToast("Gagal mereset sesi mahasiswa.", "danger");
-
+        showToast("Gagal membebaskan sesi mahasiswa.", "danger");
     }
+}
 
+async function kickStudent(nim) {
+    return clearStudentSessionLock(nim);
 }
 
 
@@ -1850,6 +1839,8 @@ window.deleteAllQuestions = deleteAllQuestions;
 window.resetStudentCategory = resetStudentCategory;
 
 window.kickStudent = kickStudent;
+
+window.clearStudentSessionLock = clearStudentSessionLock;
 
 
 

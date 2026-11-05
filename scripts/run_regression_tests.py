@@ -35,7 +35,7 @@ def main():
 
     steps = [
         ("Python Compilation (main.py, database.py, scripts/*.py)",
-         f'"{py_bin}" -m py_compile main.py database.py scripts/reset_exam_session.py scripts/test_exam_submission_suite.py scripts/test_leaderboard_and_zip_export.py scripts/test_score_retention.py'),
+         f'"{py_bin}" -m py_compile main.py database.py scripts/reset_exam_session.py scripts/test_exam_submission_suite.py scripts/test_leaderboard_and_zip_export.py scripts/test_score_retention.py scripts/test_latecomer_and_session_lock.py'),
         ("JavaScript Syntax Check (student.js, admin.js)",
          "node --check static/js/student.js && node --check static/js/admin.js"),
         ("Python Dependencies Check (pip check)",
@@ -58,6 +58,8 @@ def main():
          f'"{py_bin}" scripts/test_leaderboard_and_zip_export.py'),
         ("Anti-Score-Regression & Best Score Retention Test Suite (7 Tests)",
          f'"{py_bin}" scripts/test_score_retention.py'),
+        ("Latecomer Login, Shared NAT IP & Session Lock Test Suite (7 Tests)",
+         f'"{py_bin}" scripts/test_latecomer_and_session_lock.py'),
         ("Concurrent Query Load & Connection Pool Stress Test",
          f'"{py_bin}" scratch/test_concurrent_load.py'),
     ]

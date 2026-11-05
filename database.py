@@ -83,6 +83,9 @@ PG_STUDENT_PASS = os.getenv("PG_STUDENT_PASS", "student123")
 # or 'guided' (for informal practice/tutorials - detailed technical diffs)
 EXAM_HINT_MODE = os.getenv("EXAM_HINT_MODE", "strict").lower().strip()
 
+# Allow multiple students on shared Wi-Fi / NAT router IP address
+ALLOW_SHARED_IP = os.getenv("ALLOW_SHARED_IP", "true").lower().strip() in ("true", "1", "yes")
+
 
 
 # Multi-Database Whitelist & Metadata (pgAdmin-style selector)
@@ -173,6 +176,8 @@ def init_system_db():
             name TEXT NOT NULL,
 
             ip_address TEXT,
+
+            device_id TEXT,
 
             session_token TEXT,
 
@@ -339,6 +344,7 @@ def init_system_db():
         for table, col_def in [
             ("users", "virtual_db TEXT DEFAULT NULL"),
             ("users", "selected_category TEXT DEFAULT NULL"),
+            ("users", "device_id TEXT DEFAULT NULL"),
             ("questions", "target_database TEXT DEFAULT 'pagila'"),
             ("questions", "difficulty_level TEXT DEFAULT 'Medium'"),
             ("questions", "expected_output_image TEXT DEFAULT ''"),
@@ -540,302 +546,180 @@ def seed_default_questions(conn: sqlite3.Connection):
 
 
 
-def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds: int = 90) -> bool:
-
+def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds: int = 60) -> bool:
     if status != "online" or not last_active_str:
-
         return False
-
     try:
-
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-
-        dt = datetime.datetime.fromisoformat(last_active_str.replace("Z", ""))
-
-        return (now - dt).total_seconds() < timeout_seconds
-
+        clean_str = last_active_str.replace("Z", "").split("+")[0].strip()
+        dt = datetime.datetime.fromisoformat(clean_str)
+        diff = (now - dt).total_seconds()
+        # Normal active window: last active between 0 and timeout_seconds ago
+        if 0 <= diff < timeout_seconds:
+            return True
+        # Minor clock skew / jitter tolerance (up to 5 seconds ahead)
+        elif diff < 0 and abs(diff) < 5:
+            return True
+        return False
     except Exception:
-
         return status == "online"
 
 
 
-def login_student(nim: str, name: str, ip_address: str, session_token: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-
+def login_student(nim: str, name: str, ip_address: str, session_token: str, device_id: Optional[str] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
     nim = nim.strip()
-
     name = name.strip()
-
-
+    clean_dev = (device_id or "").strip()[:64]
 
     if not nim or not name:
-
         return False, None, "NIM dan Nama Lengkap wajib diisi!"
 
-
-
     if not re.match(r'^[A-Za-z0-9_\-\.]+$', nim):
-
         return False, None, "Format NIM tidak valid. Gunakan huruf dan angka tanpa spasi."
 
-
-
     conn = get_sqlite_conn()
-
     try:
-
         cur = conn.cursor()
 
-
-
-        # 1. Anti-Joki: Pastikan satu IP tidak menjalankan lebih dari 1 mahasiswa aktif sekaligus (kecuali localhost)
-
-        if ip_address not in ("127.0.0.1", "localhost", "::1", "testclient"):
-
+        # 1. Anti-Joki Perangkat:
+        # Jika client menyertakan device_id unik browser/perangkat,
+        # pastikan tidak ada mahasiswa lain yang sedang aktif di browser/perangkat yang sama.
+        if clean_dev:
             cur.execute(
-
-                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
-
-                (ip_address, nim)
-
+                "SELECT * FROM users WHERE device_id = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                (clean_dev, nim)
             )
-
-            other_active_on_ip = cur.fetchall()
-
-            for other_user in other_active_on_ip:
-
+            other_dev_users = cur.fetchall()
+            for other_user in other_dev_users:
                 if is_user_active(other_user["last_active"], other_user["status"]):
-
                     conn.execute(
-
                         """
-
                         INSERT INTO exam_logs (user_id, action_type, details)
-
                         VALUES (?, 'multi_account_blocked', ?);
-
                         """,
-
                         (
-
                             other_user["id"],
-
-                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat (IP: {ip_address}) sedang aktif untuk NIM {other_user['nim']}"
-
+                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat ({clean_dev[:8]}...) sedang aktif untuk NIM {other_user['nim']}"
                         )
-
                     )
-
                     conn.commit()
+                    return False, None, f"Perangkat/Browser ini masih memiliki sesi aktif untuk NIM {other_user['nim']}. Satu laptop/browser hanya boleh digunakan oleh satu mahasiswa!"
 
+        # Jika ALLOW_SHARED_IP dinonaktifkan (mode strict IP):
+        # Pastikan satu IP tidak menjalankan lebih dari 1 mahasiswa aktif sekaligus (kecuali localhost)
+        if not ALLOW_SHARED_IP and ip_address not in ("127.0.0.1", "localhost", "::1", "testclient"):
+            cur.execute(
+                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                (ip_address, nim)
+            )
+            other_active_on_ip = cur.fetchall()
+            for other_user in other_active_on_ip:
+                if is_user_active(other_user["last_active"], other_user["status"]):
+                    conn.execute(
+                        """
+                        INSERT INTO exam_logs (user_id, action_type, details)
+                        VALUES (?, 'multi_account_blocked', ?);
+                        """,
+                        (
+                            other_user["id"],
+                            f"Percobaan login dengan NIM {nim} ditolak: Perangkat (IP: {ip_address}) sedang aktif untuk NIM {other_user['nim']}"
+                        )
+                    )
+                    conn.commit()
                     return False, None, f"Perangkat ini (IP: {ip_address}) masih memiliki sesi aktif untuk NIM {other_user['nim']}. Satu perangkat hanya boleh digunakan oleh satu mahasiswa!"
 
-
-
         # 2. Cek apakah NIM ini sudah terdaftar sebelumnya
-
         cur.execute("SELECT * FROM users WHERE LOWER(nim) = LOWER(?);", (nim,))
-
         existing_user = cur.fetchone()
 
-
-
         if existing_user:
-
             user_id = existing_user["id"]
-
             reg_nim = existing_user["nim"]
-
             reg_name = existing_user["name"]
-
             old_ip = existing_user["ip_address"]
-
+            old_dev = existing_user["device_id"] if "device_id" in existing_user.keys() else None
             user_status = existing_user["status"]
-
             last_active = existing_user["last_active"]
 
-
-
             # 2a. Verifikasi Nama (Mencegah mahasiswa login dengan NIM orang lain)
-
             if reg_name.strip().lower() != name.lower():
-
                 conn.execute(
-
                     """
-
                     INSERT INTO exam_logs (user_id, action_type, details)
-
                     VALUES (?, 'nim_hijack_attempt', ?);
-
                     """,
-
                     (
-
                         user_id,
-
                         f"Percobaan login NIM {reg_nim} ditolak: Nama '{name}' tidak cocok dengan nama terdaftar '{reg_name}' (IP: {ip_address})"
-
                     )
-
                 )
-
                 conn.commit()
-
                 return False, None, f"NIM {reg_nim} sudah terdaftar atas nama '{reg_name}'. Nama yang Anda masukkan tidak cocok. Pastikan Anda tidak menggunakan NIM mahasiswa lain!"
 
-
-
             # 2b. Enforce Unique Active NIM: Cek apakah NIM sedang aktif di sesi ujian
-
             active = is_user_active(last_active, user_status)
+            is_same_device = (clean_dev and old_dev and clean_dev == old_dev) or (old_ip == ip_address)
 
-            if active:
-
-                # Jika login dari perangkat/IP yang sama persis: izinkan melanjutkan sesi (misal refresh/tab tertutup)
-
-                if old_ip == ip_address:
-
-                    conn.execute(
-
-                        """
-
-                        UPDATE users
-
-                        SET session_token = ?, status = 'online', last_active = CURRENT_TIMESTAMP
-
-                        WHERE id = ?;
-
-                        """,
-
-                        (session_token, user_id)
-
-                    )
-
-                    conn.execute(
-
-                        """
-
-                        INSERT INTO exam_logs (user_id, action_type, details)
-
-                        VALUES (?, 'resume_session', ?);
-
-                        """,
-
-                        (user_id, f"Mahasiswa {reg_nim} melanjutkan sesi pada IP {ip_address}")
-
-                    )
-
-                else:
-
-                    # Perangkat/IP LAIN mencoba login dengan NIM yang SEDANG AKTIF!
-
-                    # TOLAK login ini untuk melindungi mahasiswa yang sah yang sedang ujian
-
-                    conn.execute(
-
-                        """
-
-                        INSERT INTO exam_logs (user_id, action_type, details)
-
-                        VALUES (?, 'duplicate_nim_blocked', ?);
-
-                        """,
-
-                        (
-
-                            user_id,
-
-                            f"Percobaan login ganda NIM {reg_nim} dari IP {ip_address} DITOLAK karena sedang aktif di IP {old_ip}"
-
-                        )
-
-                    )
-
-                    conn.commit()
-
-                    return False, None, f"NIM {reg_nim} sedang aktif digunakan dalam sesi ujian pada perangkat lain (IP: {old_ip}). Setiap mahasiswa hanya dapat aktif pada 1 sesi ujian dengan NIM unik. Hubungi pengawas jika Anda perlu reset sesi."
-
-
-
-            else:
-
-                # 2c. Mahasiswa offline / direset pengawas / timeout: Izinkan login ulang dengan data yang cocok
-
+            if active and not is_same_device:
+                # Perangkat/IP LAIN mencoba login dengan NIM yang SEDANG AKTIF!
                 conn.execute(
-
                     """
-
-                    UPDATE users
-
-                    SET ip_address = ?, session_token = ?, status = 'online', last_active = CURRENT_TIMESTAMP
-
-                    WHERE id = ?;
-
-                    """,
-
-                    (ip_address, session_token, user_id)
-
-                )
-
-                conn.execute(
-
-                    """
-
                     INSERT INTO exam_logs (user_id, action_type, details)
-
-                    VALUES (?, 'login', ?);
-
+                    VALUES (?, 'duplicate_nim_blocked', ?);
                     """,
-
-                    (user_id, f"Mahasiswa {reg_nim} login kembali dari IP {ip_address}")
-
+                    (
+                        user_id,
+                        f"Percobaan login ganda NIM {reg_nim} dari IP {ip_address} (dev: {clean_dev[:8] if clean_dev else 'none'}) DITOLAK karena sedang aktif di IP {old_ip}"
+                    )
                 )
+                conn.commit()
+                return False, None, f"NIM {reg_nim} sedang aktif digunakan dalam sesi ujian pada perangkat lain (IP: {old_ip}). Setiap mahasiswa hanya dapat aktif pada 1 sesi ujian dengan NIM unik. Minta pengawas untuk 'Bebaskan Sesi' jika perangkat Anda bermasalah."
 
+            # Sesi diizinkan (melanjutkan sesi aktif di perangkat sama, atau login ulang setelah offline/timeout/reset pengawas)
+            action_type = 'resume_session' if active else 'login'
+            action_desc = f"Mahasiswa {reg_nim} melanjutkan sesi pada IP {ip_address}" if active else f"Mahasiswa {reg_nim} login kembali dari IP {ip_address}"
 
+            conn.execute(
+                """
+                UPDATE users
+                SET ip_address = ?,
+                    device_id = COALESCE(?, device_id),
+                    session_token = ?,
+                    status = 'online',
+                    last_active = CURRENT_TIMESTAMP
+                WHERE id = ?;
+                """,
+                (ip_address, clean_dev or None, session_token, user_id)
+            )
+            conn.execute(
+                """
+                INSERT INTO exam_logs (user_id, action_type, details)
+                VALUES (?, ?, ?);
+                """,
+                (user_id, action_type, action_desc)
+            )
 
         else:
-
             # 3. Registrasi Mahasiswa Baru dengan NIM unik
-
             cur.execute(
-
                 """
-
-                INSERT INTO users (nim, name, ip_address, session_token, status, last_active)
-
-                VALUES (?, ?, ?, ?, 'online', CURRENT_TIMESTAMP);
-
+                INSERT INTO users (nim, name, ip_address, device_id, session_token, status, last_active)
+                VALUES (?, ?, ?, ?, ?, 'online', CURRENT_TIMESTAMP);
                 """,
-
-                (nim, name, ip_address, session_token)
-
+                (nim, name, ip_address, clean_dev or None, session_token)
             )
-
             user_id = cur.lastrowid
-
             cur.execute(
-
                 """
-
                 INSERT INTO exam_logs (user_id, action_type, details)
-
                 VALUES (?, 'login', ?);
-
                 """,
-
                 (user_id, f"Registrasi awal dan login NIM {nim} ({name}) dari IP {ip_address}")
-
             )
-
-
 
         conn.commit()
-
         cur.execute("SELECT * FROM users WHERE id = ?;", (user_id,))
-
         user_row = dict(cur.fetchone())
-
         return True, user_row, None
 
 
@@ -966,94 +850,80 @@ def logout_student(nim: str, session_token: str):
 
 
 
-def kick_student(nim: str) -> bool:
+def clear_student_session_lock(nim: str) -> Tuple[bool, str]:
+    """Membebaskan kunci sesi perangkat & status online untuk NIM tertentu tanpa menghapus submisi."""
+    clean_nim = (nim or "").strip()
+    if not clean_nim:
+        return False, "NIM tidak boleh kosong."
 
     conn = get_sqlite_conn()
-
-    with conn:
-
+    try:
         cur = conn.cursor()
+        cur.execute("SELECT id, name FROM users WHERE LOWER(nim) = LOWER(?);", (clean_nim,))
+        user = cur.fetchone()
+        if not user:
+            return False, f"Mahasiswa dengan NIM '{clean_nim}' tidak ditemukan."
+
+        user_id = user["id"]
+        user_name = user["name"]
 
         cur.execute(
-
             """
-
             UPDATE users
-
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline'
-
-            WHERE LOWER(nim) = LOWER(?);
-
+            SET status = 'offline',
+                session_token = NULL,
+                device_id = NULL,
+                last_active = datetime('now', '-120 seconds')
+            WHERE id = ?;
             """,
-
-            (nim,)
-
+            (user_id,)
         )
-
         cur.execute(
-
             """
-
-            INSERT INTO exam_logs (action_type, details)
-
-            VALUES ('kick', ?);
-
+            INSERT INTO exam_logs (user_id, action_type, details)
+            VALUES (?, 'clear_session_lock', ?);
             """,
-
-            (f"Pengawas me-reset sesi untuk NIM {nim}",)
-
+            (user_id, f"Pengawas membebaskan kunci sesi NIM {clean_nim} ({user_name}). Jawaban mahasiswa tetap tersimpan.")
         )
+        conn.commit()
+        return True, f"Kunci sesi untuk NIM {clean_nim} ({user_name}) berhasil dibebaskan. Mahasiswa dapat langsung login kembali tanpa kehilangan data jawaban."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Gagal membebaskan kunci sesi: {str(e)}"
+    finally:
+        conn.close()
 
-    conn.close()
 
-    return True
-
+def kick_student(nim: str) -> bool:
+    success, _ = clear_student_session_lock(nim)
+    return success
 
 
 def stop_all_active_sessions() -> int:
-
-    """Hentikan semua sesi mahasiswa yang sedang berlangsung sekaligus."""
-
+    """Hentikan semua sesi mahasiswa yang sedang berlangsung sekaligus dan bebaskan semua kunci sesi."""
     conn = get_sqlite_conn()
-
     with conn:
-
         cur = conn.cursor()
-
         cur.execute(
-
             """
-
             UPDATE users
-
-            SET session_token = 'KICKED_BY_ADMIN', status = 'offline'
-
+            SET session_token = 'KICKED_BY_ADMIN',
+                device_id = NULL,
+                status = 'offline',
+                last_active = datetime('now', '-120 seconds')
             WHERE status = 'online' OR (session_token IS NOT NULL AND session_token != 'KICKED_BY_ADMIN');
-
             """
-
         )
-
         count = cur.rowcount
-
         cur.execute(
-
             """
-
             INSERT INTO exam_logs (action_type, details)
-
             VALUES ('stop_all_sessions', ?);
-
             """,
-
-            (f"Pengawas menghentikan semua sesi ujian aktif ({count} sesi dinonaktifkan)",)
-
+            (f"Pengawas menghentikan dan membebaskan semua sesi ({count} mahasiswa di-logout)",)
         )
-
     conn.close()
-
     return count
-
 
 
 def clear_exam_logs() -> int:
