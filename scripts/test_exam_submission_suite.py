@@ -427,6 +427,23 @@ INSERT INTO hewan (id_hewan, nama_hewan, spesies, id_pemilik) VALUES
         self.assertEqual(res["score"], 0)
         self.assertIn(res["eval_status"], ["syntax_error", "missing_table"])
 
+    def test_tc_ddl_11_select_bypass_rejected(self):
+        """TC-DDL-11: Submitting pure SELECT or comment+SELECT on DDL question is rejected."""
+        self.clean_student_sandbox()
+        q1 = self.questions[1]
+        submitted = "-- Jawaban Soal 1\nSELECT;"
+        res = database.evaluate_sql_submission(
+            submitted_query=submitted,
+            expected_query=q1["expected_query"],
+            score_weight=q1["score_weight"],
+            target_db=q1["target_database"],
+            active_db=q1["target_database"],
+            nim=self.test_nim
+        )
+        self.assertFalse(res["is_correct"])
+        self.assertEqual(res["score"], 0)
+        self.assertEqual(res["eval_status"], "missing_table")
+
     # =========================================================================
     # KATEGORI B: DML (INSERT INTO & Data Consistency) - Soal No. 2
     # =========================================================================
@@ -510,6 +527,23 @@ INSERT INTO hewan (id_hewan, nama_hewan, spesies, id_pemilik) VALUES
         self.assertFalse(res["is_correct"])
         self.assertEqual(res["score"], 0)
         self.assertEqual(res["eval_status"], "table_not_found")
+
+    def test_tc_dml_05_select_bypass_rejected(self):
+        """TC-DML-05: Submitting pure SELECT or comment+SELECT on DML question is rejected."""
+        self.test_tc_ddl_01_perfect_answer()
+        q2 = self.questions[2]
+        submitted = "-- Jawaban Soal 2\nSELECT;"
+        res = database.evaluate_sql_submission(
+            submitted_query=submitted,
+            expected_query=q2["expected_query"],
+            score_weight=q2["score_weight"],
+            target_db=q2["target_database"],
+            active_db=q2["target_database"],
+            nim=self.test_nim
+        )
+        self.assertFalse(res["is_correct"])
+        self.assertEqual(res["score"], 0)
+        self.assertEqual(res["eval_status"], "missing_dml")
 
     # =========================================================================
     # KATEGORI C: DQL (SELECT, JOIN, Aggregations on pagila) - Soal No. 4 & No. 5

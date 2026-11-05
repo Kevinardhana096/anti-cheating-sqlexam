@@ -2368,8 +2368,14 @@ def evaluate_sql_submission(
 
     # 4. Handle DDL (CREATE TABLE) with Deep Catalog & Multi-Table Structure Inspection (Fase 2)
     exp_tables = extract_all_table_names_from_ddl(expected_query or "")
-    if ("CREATE TABLE" in clean_q_upper) or (exp_tables and ("INSERT INTO" not in clean_q_upper) and ("SELECT" not in clean_q_upper) and ("DROP" not in clean_q_upper)):
-        if exp_tables and not ("CREATE TABLE" in clean_q_upper):
+    exp_dml_tables = extract_all_table_names_from_dml(expected_query or "")
+    has_exp_ddl = bool(exp_tables)
+    has_exp_dml = bool(exp_dml_tables)
+    has_exp_select = bool(re.search(r'\bSELECT\b', expected_query or "", re.IGNORECASE))
+
+    is_ddl_question = bool(has_exp_ddl and not has_exp_dml and not has_exp_select)
+    if is_ddl_question or ("CREATE TABLE" in clean_q_upper):
+        if is_ddl_question and not ("CREATE TABLE" in clean_q_upper):
             fb_tbl = (
                 f"Kueri Anda belum memuat perintah CREATE TABLE untuk membuat tabel ({', '.join(exp_tables)}) sesuai instruksi soal."
                 if EXAM_HINT_MODE == "guided"
@@ -2521,11 +2527,25 @@ def evaluate_sql_submission(
 
 
     # 5. Handle DML (INSERT INTO) with Deep Row Count & Value Inspection (Fase 3)
-    exp_dml_tables = extract_all_table_names_from_dml(expected_query or "")
     stud_dml_tables = extract_all_table_names_from_dml(submitted_query or "")
     target_dml_tables = exp_dml_tables if exp_dml_tables else stud_dml_tables
 
-    if ("INSERT INTO" in clean_q_upper) or (exp_dml_tables and ("SELECT" not in clean_q_upper and "CREATE TABLE" not in clean_q_upper)):
+    is_dml_question = bool(has_exp_dml and not has_exp_select)
+    if is_dml_question or ("INSERT INTO" in clean_q_upper):
+        if is_dml_question and not ("INSERT INTO" in clean_q_upper):
+            fb_dml = (
+                f"Kueri Anda belum memuat perintah INSERT INTO untuk memasukkan data ke tabel ({', '.join(exp_dml_tables)}) sesuai instruksi soal."
+                if EXAM_HINT_MODE == "guided"
+                else "Kueri Anda belum memuat perintah INSERT INTO untuk seluruh tabel yang diminta pada instruksi soal."
+            )
+            return {
+                "is_correct": False,
+                "score": 0,
+                "eval_status": "missing_dml",
+                "feedback": fb_dml,
+                "student_result": None
+            }
+
         if not target_dml_tables:
             return {
                 "is_correct": False,
@@ -2655,42 +2675,23 @@ def evaluate_sql_submission(
 
 
     # 6. Handle DROP TABLE in sandbox
-
-    if clean_q_upper.startswith("DROP TABLE") and not ddl_tbl:
-
+    if clean_q_upper.startswith("DROP TABLE") and "CREATE TABLE" not in clean_q_upper and "INSERT INTO" not in clean_q_upper:
         stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
         if not stud_res.get("success"):
-
             return {
-
                 "is_correct": False,
-
                 "score": 0,
-
                 "eval_status": "syntax_error",
-
                 "feedback": f"Error Sintaks SQL: {stud_res.get('error')}",
-
                 "student_result": stud_res
-
             }
-
         return {
-
             "is_correct": True,
-
             "score": int(score_weight),
-
             "eval_status": "correct",
-
             "feedback": f"Sempurna! Tabel berhasil dibersihkan dari skema database (+{score_weight} Poin).",
-
             "student_result": stud_res
-
         }
-
-
 
     # 7. Handle SELECT query evaluation
     is_sandbox = (target_db_clean == "sandbox_pribadi")
@@ -2698,8 +2699,16 @@ def evaluate_sql_submission(
 
     if is_sandbox:
         # Extract the SELECT query from expected_query to run before tables might be dropped
-        exp_stmts = [s.strip() for s in expected_query.split(";") if s.strip()]
+        exp_stmts = [s.strip() for s in (expected_query or "").split(";") if s.strip()]
         exp_select_stmts = [s for s in exp_stmts if s.upper().startswith("SELECT") or ("SELECT" in s.upper() and not s.upper().startswith("DROP"))]
+        if not exp_select_stmts and expected_query and expected_query.strip():
+            return {
+                "is_correct": False,
+                "score": 0,
+                "eval_status": "wrong_command",
+                "feedback": "Instruksi soal ini bukan merupakan kueri SELECT laporan. Periksa kembali jenis perintah SQL yang diminta pada instruksi soal.",
+                "student_result": None
+            }
         exp_query_to_run = ";\n".join(exp_select_stmts) if exp_select_stmts else expected_query
         exp_res = execute_student_query(exp_query_to_run, active_db=target_db_clean, nim=eval_nim)
         # Also strip any accidental DROP statements from student query during SELECT evaluation to prevent sandbox data loss
@@ -2748,13 +2757,28 @@ def evaluate_sql_submission(
             "student_result": stud_res
         }
 
-
-
     # Compare Column Counts
-
     stud_cols = stud_res.get("columns", [])
-
     exp_cols = exp_res.get("columns", [])
+
+    # Guard against 0-column false positives
+    if len(stud_cols) == 0:
+        return {
+            "is_correct": False,
+            "score": 0,
+            "eval_status": "column_mismatch",
+            "feedback": "Kueri SQL Anda tidak menghasilkan kolom keluaran laporan. Periksa kembali klausa SELECT yang Anda tuliskan.",
+            "student_result": stud_res
+        }
+
+    if len(exp_cols) == 0:
+        return {
+            "is_correct": False,
+            "score": 0,
+            "eval_status": "reference_error",
+            "feedback": "Kueri acuan soal tidak menghasilkan kolom data laporan. Silakan laporkan kepada pengawas ujian.",
+            "student_result": stud_res
+        }
 
     if len(stud_cols) != len(exp_cols):
         fb_col = (
