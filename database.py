@@ -79,6 +79,10 @@ PG_STUDENT_USER = os.getenv("PG_STUDENT_USER", "student_role")
 
 PG_STUDENT_PASS = os.getenv("PG_STUDENT_PASS", "student123")
 
+# Exam Hint Mode: 'strict' (default for formal exams - pedagogical guidance without spilling answers)
+# or 'guided' (for informal practice/tutorials - detailed technical diffs)
+EXAM_HINT_MODE = os.getenv("EXAM_HINT_MODE", "strict").lower().strip()
+
 
 
 # Multi-Database Whitelist & Metadata (pgAdmin-style selector)
@@ -2037,11 +2041,11 @@ def compare_table_records(
 
 
     if len(stud_rows) != len(ref_rows):
-
         details["status"] = "row_count_mismatch"
-
-        msg = f"Jumlah baris data pada tabel '{table_name}' ({len(stud_rows)} baris) belum sesuai. Periksa kembali jumlah data yang dimasukkan."
-
+        if EXAM_HINT_MODE == "guided":
+            msg = f"Jumlah baris data pada tabel '{table_name}' ({len(stud_rows)} baris) belum sesuai. Periksa kembali jumlah data yang dimasukkan (diharapkan {len(ref_rows)} baris)."
+        else:
+            msg = f"Kuantitas baris data pada tabel '{table_name}' belum sesuai. Periksa kembali seluruh data registrasi mentah yang diminta untuk dimasukkan."
         return False, msg, details
 
 
@@ -2496,11 +2500,16 @@ def evaluate_sql_submission(
     exp_tables = extract_all_table_names_from_ddl(expected_query or "")
     if ("CREATE TABLE" in clean_q_upper) or (exp_tables and ("INSERT INTO" not in clean_q_upper) and ("SELECT" not in clean_q_upper) and ("DROP" not in clean_q_upper)):
         if exp_tables and not ("CREATE TABLE" in clean_q_upper):
+            fb_tbl = (
+                f"Kueri Anda belum memuat perintah CREATE TABLE untuk membuat tabel ({', '.join(exp_tables)}) sesuai instruksi soal."
+                if EXAM_HINT_MODE == "guided"
+                else "Kueri Anda belum memuat perintah CREATE TABLE untuk seluruh tabel yang diminta pada instruksi soal."
+            )
             return {
                 "is_correct": False,
                 "score": 0,
                 "eval_status": "missing_table",
-                "feedback": f"Kueri Anda belum memuat perintah CREATE TABLE untuk membuat tabel ({', '.join(exp_tables)}) sesuai instruksi soal.",
+                "feedback": fb_tbl,
                 "student_result": None
             }
 
@@ -2878,67 +2887,51 @@ def evaluate_sql_submission(
     exp_cols = exp_res.get("columns", [])
 
     if len(stud_cols) != len(exp_cols):
-
+        fb_col = (
+            f"Jumlah kolom hasil query ({len(stud_cols)} kolom) belum sesuai dengan instruksi soal ({len(exp_cols)} kolom). Periksa kembali kolom pada klausa SELECT Anda."
+            if EXAM_HINT_MODE == "guided"
+            else "Daftar kolom keluaran belum sesuai format laporan yang diminta. Periksa kembali atribut atau ekspresi yang harus ditampilkan pada klausa SELECT."
+        )
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "column_mismatch",
-
-            "feedback": f"Jumlah kolom hasil query ({len(stud_cols)} kolom) belum sesuai dengan instruksi soal ({len(exp_cols)} kolom). Periksa kembali kolom pada klausa SELECT Anda.",
-
+            "feedback": fb_col,
             "student_result": stud_res
-
         }
-
-
 
     # Compare Column Names
-
     stud_cols_norm = [c.lower() for c in stud_cols]
-
     exp_cols_norm = [c.lower() for c in exp_cols]
-
     if stud_cols_norm != exp_cols_norm:
-
+        fb_names = (
+            f"Nama atau susunan kolom belum sesuai spesifikasi soal. Kolom kueri Anda: [{', '.join(stud_cols)}]. Periksa kembali alias (AS) atau urutan kolom pada klausa SELECT."
+            if EXAM_HINT_MODE == "guided"
+            else "Label penamaan kolom (alias) atau urutan penyajian atribut laporan belum sesuai spesifikasi acuan. Periksa kembali klausa SELECT dan alias (AS) yang digunakan."
+        )
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "column_mismatch",
-
-            "feedback": f"Nama atau susunan kolom belum sesuai spesifikasi soal. Kolom kueri Anda: [{', '.join(stud_cols)}]. Periksa kembali alias (AS) atau urutan kolom pada klausa SELECT.",
-
+            "feedback": fb_names,
             "student_result": stud_res
-
         }
 
-
-
     # Compare Row Counts
-
     stud_rows = stud_res.get("rows", [])
-
     exp_rows = exp_res.get("rows", [])
-
     if len(stud_rows) != len(exp_rows):
-
+        fb_rows = (
+            f"Jumlah baris data hasil query ({len(stud_rows)} baris) belum sesuai. Periksa kembali filter kondisi WHERE, GROUP BY, atau relasi JOIN Anda."
+            if EXAM_HINT_MODE == "guided"
+            else "Keluaran data yang dihasilkan belum memenuhi kriteria laporan. Periksa kembali logika filter kondisi WHERE, pengelompokan GROUP BY, atau relasi JOIN Anda."
+        )
         return {
-
             "is_correct": False,
-
             "score": 0,
-
             "eval_status": "row_count_mismatch",
-
-            "feedback": f"Jumlah baris data hasil query ({len(stud_rows)} baris) belum sesuai. Periksa kembali filter kondisi WHERE, GROUP BY, atau relasi JOIN Anda.",
-
+            "feedback": fb_rows,
             "student_result": stud_res
-
         }
 
 
@@ -5798,158 +5791,102 @@ def compare_table_structures(
 
 
     # 2. Missing columns check
-
     missing = [c for c in exp_cols if c not in stud_cols]
-
     if missing:
-
         details["missing_columns"] = missing
-
-        missing_names = ", ".join(f"'{exp_cols[m]['name']}'" for m in missing)
-
-        msg = f"Struktur tabel '{table_name}' belum lengkap. Kolom berikut belum ditemukan: {missing_names}."
-
+        if EXAM_HINT_MODE == "guided":
+            missing_names = ", ".join(f"'{exp_cols[m]['name']}'" for m in missing)
+            msg = f"Struktur tabel '{table_name}' belum lengkap. Kolom berikut belum ditemukan: {missing_names}."
+        else:
+            msg = f"Struktur tabel '{table_name}' belum lengkap. Masih ada atribut kolom yang diminta pada spesifikasi soal yang belum didefinisikan ke dalam tabel."
         return False, msg, details
 
-
-
     # Extra columns detection (for diagnostic info)
-
     extra = [c for c in stud_cols if c not in exp_cols]
-
     details["extra_columns"] = extra
 
-
-
     # 3. Data type & length/precision compatibility check
-
     INT_FAMILY = {"int4", "int2", "integer", "smallint", "serial"}
-
     BIGINT_FAMILY = {"int8", "bigint", "bigserial"}
 
-
-
     for col_name, exp_c in exp_cols.items():
-
         stud_c = stud_cols[col_name]
-
         exp_dtype = (exp_c.get("data_type") or "").lower()
-
         stud_dtype = (stud_c.get("data_type") or "").lower()
-
         exp_udt = (exp_c.get("udt_name") or "").lower()
-
         stud_udt = (stud_c.get("udt_name") or "").lower()
 
-
-
         type_match = False
-
         if exp_udt and stud_udt and exp_udt == stud_udt:
-
             type_match = True
-
         elif exp_dtype == stud_dtype:
-
             type_match = True
-
         elif exp_udt in INT_FAMILY and stud_udt in INT_FAMILY:
-
             type_match = True
-
         elif exp_udt in BIGINT_FAMILY and stud_udt in BIGINT_FAMILY:
-
             type_match = True
-
         elif exp_dtype in ("character varying", "varchar") and stud_dtype in ("character varying", "varchar"):
-
             type_match = True
-
-
 
         if not type_match:
-
             exp_label = normalize_type_label(exp_c)
-
             stud_label = normalize_type_label(stud_c)
-
             mismatch_desc = f"Kolom '{stud_c['name']}': tipe data tidak sesuai (Diharapkan {exp_label}, tetapi ditemukan {stud_label})."
-
             details["type_mismatches"].append(mismatch_desc)
-
-            return False, mismatch_desc, details
-
-
+            if EXAM_HINT_MODE == "guided":
+                msg = mismatch_desc
+            else:
+                msg = f"Terdapat tipe data tidak sesuai pada definisi atribut tabel '{table_name}'. Periksa kembali kesesuaian tipe data angka atau teks pada rancangan soal."
+            return False, msg, details
 
         # For VARCHAR/CHAR, check maximum length if expected specifies one
-
         if exp_dtype in ("character varying", "character"):
-
             exp_len = exp_c.get("character_maximum_length")
-
             stud_len = stud_c.get("character_maximum_length")
-
             if exp_len is not None and stud_len is not None and exp_len != stud_len:
-
                 mismatch_desc = f"Ukuran panjang kolom '{stud_c['name']}' tidak sesuai. Diharapkan {normalize_type_label(exp_c)}, namun ditemukan {normalize_type_label(stud_c)}."
-
                 details["type_mismatches"].append(mismatch_desc)
-
-                return False, mismatch_desc, details
-
-
+                if EXAM_HINT_MODE == "guided":
+                    msg = mismatch_desc
+                else:
+                    msg = f"Ukuran panjang kolom pada tabel '{table_name}' belum sesuai batas maksimal karakter yang diminta. Periksa kembali alokasi panjang karakter pada klausul VARCHAR/CHAR Anda."
+                return False, msg, details
 
         # For NUMERIC/DECIMAL, check precision & scale if expected specifies
-
         if exp_dtype == "numeric":
-
             exp_scale = exp_c.get("numeric_scale")
-
             stud_scale = stud_c.get("numeric_scale")
-
             if exp_scale is not None and stud_scale is not None and exp_scale != stud_scale:
-
                 mismatch_desc = f"Presisi skala desimal kolom '{stud_c['name']}' tidak sesuai. Diharapkan {normalize_type_label(exp_c)}, namun ditemukan {normalize_type_label(stud_c)}."
-
                 details["type_mismatches"].append(mismatch_desc)
-
-                return False, mismatch_desc, details
-
-
+                if EXAM_HINT_MODE == "guided":
+                    msg = mismatch_desc
+                else:
+                    msg = f"Presisi skala desimal kolom pada tabel '{table_name}' belum sesuai spesifikasi angka pada narasi soal."
+                return False, msg, details
 
     # 4. Primary Key validation
-
     exp_pk_cols = [c.lower() for c in expected_meta.get("constraints", {}).get("primary_key", [])]
-
     stud_pk_cols = [c.lower() for c in student_meta.get("constraints", {}).get("primary_key", [])]
 
-
-
     if exp_pk_cols:
-
         if not stud_pk_cols:
-
             details["pk_status"] = "missing"
-
-            pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
-
-            msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Diharapkan kolom primary key: {pk_names}."
-
+            if EXAM_HINT_MODE == "guided":
+                pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
+                msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Diharapkan kolom primary key: {pk_names}."
+            else:
+                msg = f"Constraint PRIMARY KEY belum didefinisikan pada tabel '{table_name}'. Pastikan identitas unik entitas telah ditentukan sebagai primary key."
             return False, msg, details
-
         elif set(exp_pk_cols) != set(stud_pk_cols):
-
             details["pk_status"] = "mismatch"
-
-            exp_pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
-
-            stud_pk_names = ", ".join(f"'{stud_cols.get(p, {}).get('name', p)}'" for p in stud_pk_cols)
-
-            msg = f"Definisi PRIMARY KEY pada tabel '{table_name}' tidak sesuai. Diharapkan ({exp_pk_names}), namun ditemukan ({stud_pk_names})."
-
+            if EXAM_HINT_MODE == "guided":
+                exp_pk_names = ", ".join(f"'{exp_cols.get(p, {}).get('name', p)}'" for p in exp_pk_cols)
+                stud_pk_names = ", ".join(f"'{stud_cols.get(p, {}).get('name', p)}'" for p in stud_pk_cols)
+                msg = f"Definisi PRIMARY KEY pada tabel '{table_name}' tidak sesuai. Diharapkan ({exp_pk_names}), namun ditemukan ({stud_pk_names})."
+            else:
+                msg = f"Definisi batasan constraint PRIMARY KEY pada tabel '{table_name}' belum sesuai rancangan unik entitas. Periksa kembali pemilihan kolom primary key Anda."
             return False, msg, details
-
-
 
     # 5. NOT NULL constraint validation (for non-PK columns)
     for col_name, exp_c in exp_cols.items():
@@ -5959,7 +5896,10 @@ def compare_table_structures(
             stud_c = stud_cols.get(col_name)
             if stud_c and stud_c.get("is_nullable", True):
                 details["nullability_mismatches"].append(col_name)
-                msg = f"Kolom '{stud_c['name']}' pada tabel '{table_name}' seharusnya memiliki constraint NOT NULL (tidak boleh bernilai NULL)."
+                if EXAM_HINT_MODE == "guided":
+                    msg = f"Kolom '{stud_c['name']}' pada tabel '{table_name}' seharusnya memiliki constraint NOT NULL (tidak boleh bernilai NULL)."
+                else:
+                    msg = f"Terdapat atribut wajib pada tabel '{table_name}' yang belum dipasangi constraint NOT NULL. Pastikan kolom yang wajib diisi tidak mengizinkan nilai NULL."
                 return False, msg, details
 
     # 6. UNIQUE constraint validation (for non-PK columns)
@@ -5969,8 +5909,11 @@ def compare_table_structures(
     for u_col in exp_non_pk_uniques:
         if u_col not in stud_uniques:
             details["unique_status"] = "missing"
-            u_name = exp_cols.get(u_col, {}).get("name", u_col)
-            msg = f"Kolom '{u_name}' pada tabel '{table_name}' seharusnya memiliki constraint UNIQUE (tidak boleh ada nilai duplikat)."
+            if EXAM_HINT_MODE == "guided":
+                u_name = exp_cols.get(u_col, {}).get("name", u_col)
+                msg = f"Kolom '{u_name}' pada tabel '{table_name}' seharusnya memiliki constraint UNIQUE (tidak boleh ada nilai duplikat)."
+            else:
+                msg = f"Tabel '{table_name}' belum memiliki constraint UNIQUE yang dipersyaratkan. Pastikan atribut kontak/data yang tidak boleh bernilai ganda telah dipasangi batasan unik."
             return False, msg, details
 
     # 7. FOREIGN KEY constraint validation
@@ -5979,8 +5922,11 @@ def compare_table_structures(
     for fk_col in exp_fks:
         if fk_col not in stud_fks:
             details["fk_status"] = "missing"
-            fk_name = exp_cols.get(fk_col, {}).get("name", fk_col)
-            msg = f"Kolom '{fk_name}' pada tabel '{table_name}' seharusnya memiliki constraint FOREIGN KEY yang mereferensikan tabel induk."
+            if EXAM_HINT_MODE == "guided":
+                fk_name = exp_cols.get(fk_col, {}).get("name", fk_col)
+                msg = f"Kolom '{fk_name}' pada tabel '{table_name}' seharusnya memiliki constraint FOREIGN KEY yang mereferensikan tabel induk."
+            else:
+                msg = f"Relasi integritas referensial constraint FOREIGN KEY pada tabel '{table_name}' belum terpasang dengan benar. Periksa kembali foreign key yang mengaitkan ke tabel induk."
             return False, msg, details
 
     msg = f"Sempurna! Struktur tabel '{table_name}' (kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY) 100% valid sesuai spesifikasi acuan dosen."
