@@ -2049,15 +2049,18 @@ def _normalize_cell_value(val: Any) -> Any:
     """Normalizes cell values for reliable comparisons between PostgreSQL and SQLite."""
 
     if val is None:
-
         return None
 
-    if isinstance(val, (int, float)):
+    if isinstance(val, bool):
+        return val
 
+    if isinstance(val, (int, float)):
+        return round(float(val), 4)
+
+    if isinstance(val, decimal.Decimal):
         return round(float(val), 4)
 
     if isinstance(val, (datetime.date, datetime.datetime)):
-
         return str(val)
 
     val_str = str(val).strip()
@@ -5014,31 +5017,26 @@ def execute_student_query(
                 for r in fetched:
 
                     row_items = []
-
                     for val in r:
-
-                        if isinstance(val, (datetime.date, datetime.datetime)):
-
-                            row_items.append(val.isoformat())
-
-                        elif hasattr(val, '__float__'):
-
-                            row_items.append(float(val))
-
-                        elif val is None:
-
+                        if val is None:
                             row_items.append(None)
-
+                        elif isinstance(val, bool):
+                            row_items.append(val)
+                        elif isinstance(val, int):
+                            row_items.append(val)
+                        elif isinstance(val, decimal.Decimal):
+                            row_items.append(str(val))
+                        elif isinstance(val, float):
+                            row_items.append(val)
+                        elif isinstance(val, (datetime.date, datetime.datetime, datetime.time)):
+                            row_items.append(val.isoformat())
+                        elif hasattr(val, '__float__'):
+                            row_items.append(float(val))
                         else:
-
                             s_val = str(val)
-
                             if len(s_val) > MAX_OUTPUT_CELL_CHARS:
-
                                 s_val = s_val[:MAX_OUTPUT_CELL_CHARS] + " ...[truncated]"
-
                             row_items.append(s_val)
-
                     rows.append(row_items)
 
             else:
@@ -5151,25 +5149,23 @@ def execute_student_query(
                 for r in fetched:
 
                     row_items = []
-
                     for val in r:
-
-                        if isinstance(val, (datetime.date, datetime.datetime)):
-
-                            row_items.append(val.isoformat())
-
-                        elif hasattr(val, '__float__'):
-
-                            row_items.append(float(val))
-
-                        elif val is None:
-
+                        if val is None:
                             row_items.append(None)
-
-                        else:
-
+                        elif isinstance(val, bool):
+                            row_items.append(val)
+                        elif isinstance(val, int):
+                            row_items.append(val)
+                        elif isinstance(val, decimal.Decimal):
                             row_items.append(str(val))
-
+                        elif isinstance(val, float):
+                            row_items.append(val)
+                        elif isinstance(val, (datetime.date, datetime.datetime, datetime.time)):
+                            row_items.append(val.isoformat())
+                        elif hasattr(val, '__float__'):
+                            row_items.append(float(val))
+                        else:
+                            row_items.append(str(val))
                     rows.append(row_items)
 
             else:
@@ -6100,10 +6096,16 @@ def get_table_data(db_name: str, table_name: str, limit: int = 50, offset: int =
             for cell in row:
                 if cell is None:
                     formatted_row.append(None)
+                elif isinstance(cell, bool):
+                    formatted_row.append(cell)
+                elif isinstance(cell, int):
+                    formatted_row.append(cell)
+                elif isinstance(cell, decimal.Decimal):
+                    formatted_row.append(str(cell))
+                elif isinstance(cell, float):
+                    formatted_row.append(cell)
                 elif isinstance(cell, (datetime.datetime, datetime.date, datetime.time, dt_time)):
                     formatted_row.append(str(cell))
-                elif isinstance(cell, decimal.Decimal):
-                    formatted_row.append(float(cell))
                 elif isinstance(cell, (bytes, memoryview)):
                     formatted_row.append(f"<binary {len(cell)} bytes>")
                 elif isinstance(cell, (dict, list)):
