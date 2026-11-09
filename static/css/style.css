@@ -4539,3 +4539,41 @@ code, pre {
   from { transform: translateY(-100%); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
+
+.image-lightbox-body { min-height: 0; }
+.image-lightbox-body.is-original {
+  display: block;
+  box-sizing: border-box;
+  width: 88vw;
+  max-width: 100%;
+  height: 78vh;
+  overflow: auto;
+}
+.image-lightbox-body.is-original .image-lightbox-img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  width: auto;
+  height: auto;
+}
+
+body.exam-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.exam-workspace > .app-header {
+  height: auto;
+  min-height: 56px;
+  padding: .5rem 1.25rem;
+  flex-wrap: wrap;
+}
+.exam-workspace > .ide-container {
+  flex: 1;
+  height: auto;
+}
+@media (max-width: 900px) {
+  body.exam-workspace { height: auto; }
+  .exam-workspace .brand-wrapper { flex-wrap: wrap; min-width: 0; }
+  .exam-workspace .brand-title { white-space: normal; }
+}

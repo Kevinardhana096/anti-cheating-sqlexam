@@ -1,0 +1,152 @@
+{
+  "created_at_utc": "2026-11-08T01:37:29.309003+00:00",
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.14.6",
+    "logical_cpus": 8,
+    "postgres": "18.6",
+    "http_server": "uvicorn, one process",
+    "fixture_fsync": false
+  },
+  "students": 24,
+  "stages": [
+    {
+      "stage": "shared_ip_login",
+      "requests": 24,
+      "workers": 24,
+      "seconds": 0.927,
+      "operations_per_second": 25.88,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 203.51,
+      "p95_ms": 768.07,
+      "p99_ms": 916.33,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "master_preview",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 0.571,
+      "operations_per_second": 42.04,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 48.28,
+      "p95_ms": 261.43,
+      "p99_ms": 289.52,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "sandbox_cold_preview",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 3.373,
+      "operations_per_second": 7.12,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 529.56,
+      "p95_ms": 651.57,
+      "p99_ms": 717.34,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "paced_full_grading",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 3.778,
+      "operations_per_second": 6.35,
+      "outcomes": {
+        "graded_correct": 24
+      },
+      "p50_ms": 577.55,
+      "p95_ms": 777.56,
+      "p99_ms": 878.55,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "burst_full_grading",
+      "requests": 24,
+      "workers": 24,
+      "seconds": 0.979,
+      "operations_per_second": 24.51,
+      "outcomes": {
+        "graded_correct": 4,
+        "pending_limit": 20
+      },
+      "p50_ms": 378.46,
+      "p95_ms": 962.36,
+      "p99_ms": 968.62,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "paced_retry_grading",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 3.738,
+      "operations_per_second": 6.42,
+      "outcomes": {
+        "graded_correct": 24
+      },
+      "p50_ms": 609.77,
+      "p95_ms": 762.92,
+      "p99_ms": 793.34,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "submit_after_stop",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 0.194,
+      "operations_per_second": 123.58,
+      "outcomes": {
+        "blocked": 24
+      },
+      "p50_ms": 26.66,
+      "p95_ms": 45.39,
+      "p99_ms": 48.48,
+      "unexpected_errors": []
+    }
+  ],
+  "all_best_scores_preserved": true,
+  "pending_attempts_have_null_scores": true,
+  "diagnostics": {
+    "health": {
+      "sqlite": true,
+      "postgres_admin": true,
+      "postgres_student": true,
+      "databases": {
+        "classicmodels": {
+          "admin": true,
+          "student": true
+        },
+        "pagila": {
+          "admin": true,
+          "student": true
+        }
+      },
+      "details": {
+        "sqlite_version": 4
+      }
+    },
+    "pool": {
+      "total_acquired": 77,
+      "avg_wait_ms": 14.1,
+      "max_wait_ms": 225.17,
+      "exhausted_count": 0,
+      "active_pools": [
+        "pagila"
+      ]
+    },
+    "limits": {
+      "sandbox_connections_per_process": 20,
+      "grading_slots_per_process": 4,
+      "query_seconds": 5.0,
+      "grading_seconds": 10.0
+    }
+  },
+  "passed": true,
+  "limits": "Synthetic loopback workload, not a production class-capacity guarantee."
+}

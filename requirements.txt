@@ -6,3 +6,4 @@ python-multipart==0.0.33
 pydantic==2.14.2
 pillow==13.0.0
 httpx==0.28.1
+pglast==8.7

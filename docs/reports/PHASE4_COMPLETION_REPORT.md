@@ -1,4 +1,6 @@
 # Laporan Penyelesaian Fase 4 – Penguatan Sistem, Pembersihan Overkill, dan Optimalisasi UI/UX
+
+> Catatan hasil pada versi/putaran tertentu. Untuk prosedur terkini gunakan [panduan aktif](../README.md); angka tes dan benchmark di bawah bukan hasil pengukuran ulang.
 **Offline SQL Exam System – Praktikum Basis Data**
 
 ---

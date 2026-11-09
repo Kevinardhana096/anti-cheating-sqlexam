@@ -81,10 +81,13 @@
                     <option value="light">Light Mode</option>
                 </select>
             </div>
-            <a href="/logout" class="btn btn-secondary btn-sm header-action">
+            <form method="POST" action="/logout" style="display:inline;">
+            <input type="hidden" name="session_token" value="{{ user.session_token }}">
+            <button type="submit" class="btn btn-secondary btn-sm header-action">
                 <svg width="13" height="13" style="display:inline-block;vertical-align:middle;margin-right:4px;"><use href="#icon-log-out"/></svg>
                 Keluar
-            </a>
+            </button>
+            </form>
         </div>
     </header>
 
@@ -94,8 +97,8 @@
                 <div class="wr-pulse-ring" id="wr-pulse-ring">
                     <svg width="30" height="30" style="color:var(--warning);"><use href="#icon-clock"/></svg>
                 </div>
-                <div class="wr-status-title" id="wr-status-title">Menunggu Ujian Dimulai</div>
-                <p class="wr-status-desc" id="wr-status-desc">Dosen/pengawas belum membuka lembar soal. Harap tunggu dan jangan tutup halaman ini.</p>
+                <div class="wr-status-title" id="wr-status-title">{{ "Ujian Selesai" if exam_state == "finished" else "Menunggu Ujian Dimulai" }}</div>
+                <p class="wr-status-desc" id="wr-status-desc">{{ "Akses soal dan perubahan jawaban telah ditutup oleh pengawas." if exam_state == "finished" else "Dosen/pengawas belum membuka lembar soal. Harap tunggu dan jangan tutup halaman ini." }}</p>
                 <div class="wr-dot-loader" id="wr-dot-loader">
                     <span></span><span></span><span></span>
                 </div>
@@ -145,17 +148,25 @@
         var grid = document.getElementById("wr-participants-grid");
         var countEl = document.getElementById("wr-participant-count");
         if (!grid) return;
-        if (countEl) countEl.textContent = list.length;
-
-        var newNims = new Set(list.map(function(p){ return p.nim; }));
-        Array.from(grid.querySelectorAll(".wr-participant-card")).forEach(function(el){
-            if (!newNims.has(el.dataset.nim)) el.remove();
-        });
-
-        var existingNims = new Set(Array.from(grid.querySelectorAll(".wr-participant-card")).map(function(el){ return el.dataset.nim; }));
+        var unique = new Map();
         list.forEach(function(p){
-            if (!existingNims.has(p.nim)) grid.appendChild(buildCard(p));
+            var key = String(p.nim || "").trim().toLowerCase();
+            if (key && !unique.has(key)) unique.set(key, p);
         });
+        if (countEl) countEl.textContent = unique.size;
+        var existing = new Set();
+        Array.from(grid.querySelectorAll(".wr-participant-card")).forEach(function(el){
+            var key = String(el.dataset.nim || "").trim().toLowerCase();
+            if (!unique.has(key) || existing.has(key)) el.remove();
+            else existing.add(key);
+        });
+        unique.forEach(function(p, key){
+            if (!existing.has(key)) {
+                grid.appendChild(buildCard(p));
+                existing.add(key);
+            }
+        });
+        list = Array.from(unique.values());
 
         var empty = grid.querySelector(".wr-empty-state");
         if (list.length === 0){
@@ -223,10 +234,14 @@
         if (examStarted) return;
         try {
             var r = await fetch("/api/exam/state");
+            if (r.status === 401) { window.location.replace("/login"); return; }
             if (r.ok){
                 var d = await r.json();
                 if (d.state === "active"){
                     triggerExamStart();
+                } else {
+                    document.getElementById("wr-status-title").textContent = d.state === "finished" ? "Ujian Selesai" : "Menunggu Ujian Dimulai";
+                    document.getElementById("wr-status-desc").textContent = d.state === "finished" ? "Akses soal dan perubahan jawaban telah ditutup oleh pengawas." : "Dosen/pengawas belum membuka lembar soal. Harap tunggu dan jangan tutup halaman ini.";
                 }
             }
         } catch (_) {}

@@ -1,179 +1,82 @@
-# Manual Instalasi & Panduan Setup Server
-**Offline SQL Exam System – Praktikum Basis Data**
+# Manual instalasi Windows, macOS dan Linux
 
-Manual ini memuat panduan instalasi teknis dan langkah konfigurasi server secara mandiri untuk persiapan lingkungan ujian praktikum basis data berbasis offline local network.
+Panduan aktif, diperiksa 8 November 2026. Untuk daftar panduan lain lihat [indeks dokumentasi](docs/README.md).
 
----
+## Prasyarat
 
-## 1. Prasyarat Sistem & Perangkat Lunak
+- Git, Python **3.11+** dengan venv/pip, dan service PostgreSQL lokal.
+- PostgreSQL 14+ merupakan target dukungan aplikasi; pengujian terbaru memakai PostgreSQL 18.6 dan Python 3.14.6 pada Windows. Ini bukan bukti pengujian setiap kombinasi versi atau instalasi macOS baru.
+- Kebutuhan Python 3.11 berasal dari `pillow==13.0.0` dalam requirements.txt.
+- Akun administrator PostgreSQL yang dapat membuat database/role serta mengatur hak akses. Username tidak selalu `postgres`.
+- Internet untuk mengunduh dependensi saat setup. Pelaksanaan memakai aset lokal.
 
-Sebelum memulai instalasi, pastikan laptop host telah terpasang:
-* **Sistem Operasi:** Windows 10/11, Ubuntu 20.04/22.04 LTS, atau macOS 12+
-* **Python:** Versi 3.10 atau lebih baru (disertai modul `venv` dan `pip`)
-* **PostgreSQL:** Versi 14, 15, atau 16
-* **Browser:** Google Chrome atau Microsoft Edge versi modern
+Ganti `<URL-repository>` dengan URL repo sebenarnya dan sesuaikan nama direktori hasil clone. Jangan memasukkan placeholder password apa adanya.
 
----
+## Windows: PowerShell
 
-## 2. Persiapan Repositori Proyek
+Pastikan PostgreSQL berjalan di `services.msc`. Pada PowerShell:
 
-Buka terminal / Command Prompt dan pastikan berada pada direktori utama proyek:
-```bash
-cd c:\project\anti-cheating-sqlexam
+```powershell
+git clone <URL-repository>
+cd anti-cheating-sqlexam
+$env:PG_HOST = "localhost"
+$env:PG_PORT = "5432"
+$env:PG_ADMIN_USER = "postgres"
+$env:PG_ADMIN_PASS = "password_postgresql_anda"
+$env:ADMIN_MASTER_KEY = "master_key_pilihan_anda"
+.\setup.bat
+.\run.bat
 ```
 
----
+Gunakan master key minimal 12 karakter agar memenuhi ketentuan penggantian key. Alternatif runner PowerShell adalah `.\run.ps1`. `setup.bat` membuat `.venv`, memasang dependensi dan menjalankan setup SQLite; tidak memasang PostgreSQL. Pada CMD gunakan `set "PG_ADMIN_USER=postgres"` dan pola yang sama untuk variabel lain, kemudian `setup.bat` dan `run.bat`.
 
-## 3. Konfigurasi Lingkungan Virtual Python (`.venv`)
+## macOS / Linux: Terminal
 
-Gunakan virtual environment terisolasi untuk menghindari konflik pustaka global:
+Jalankan service PostgreSQL melalui pengelola instalasi yang digunakan. Nama service Homebrew dapat berversi; jangan mengasumsikan satu nama service untuk semua laptop.
 
-### Windows (Command Prompt / PowerShell):
-```cmd
-:: 1. Buat virtual environment
-python -m venv .venv
-
-:: 2. Aktivasi virtual environment
-:: Command Prompt:
-.venv\Scripts\activate.bat
-:: PowerShell:
-.venv\Scripts\Activate.ps1
-
-:: 3. Upgrade pip dan instal dependensi
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-:: 4. Verifikasi pustaka terpasang bersih tanpa konflik
-pip check
-```
-
-### Linux / macOS (Bash / Zsh):
 ```bash
-# 1. Buat virtual environment
+git clone <URL-repository>
+cd anti-cheating-sqlexam
+export PG_HOST="localhost"
+export PG_PORT="5432"
+export PG_ADMIN_USER="postgres"
+export PG_ADMIN_PASS="password_postgresql_anda"
+export ADMIN_MASTER_KEY="master_key_pilihan_anda"
 python3 -m venv .venv
-
-# 2. Aktivasi virtual environment
 source .venv/bin/activate
-
-# 3. Upgrade pip dan instal dependensi
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Verifikasi pustaka terpasang bersih tanpa konflik
-pip check
+python -m pip install -r requirements.txt
+python scripts/setup_sqlite.py
+bash run.sh
 ```
 
----
+File `.bat` hanya untuk Windows. Tidak ada `setup.sh`; langkah Python di atas merupakan padanannya.
 
-## 4. Konfigurasi File Lingkungan (`.env`)
+## Environment dan startup
 
-Buat atau perbarui file `.env` pada root repositori dengan parameter koneksi PostgreSQL lokal:
+Environment harus tersedia pada terminal/proses yang menjalankan server. Aplikasi **tidak memuat `.env` otomatis**. Variabel dari satu PowerShell tidak otomatis tersedia pada double-click dari File Explorer atau terminal baru. Tidak perlu mengedit kredensial dalam database.py atau memasukkannya ke script yang disimpan di repo.
 
-```ini
-# Port dan Host Aplikasi
-APP_HOST=0.0.0.0
-APP_PORT=8000
+`ADMIN_MASTER_KEY` hanya bootstrap ketika SQLite belum menyimpan key. Untuk key yang sudah ada gunakan dashboard atau [pemulihan lokal](docs/operations/ADMIN_SECURITY.md); mengganti environment tidak meresetnya.
 
-# Kredensial Administrator PostgreSQL Lokal Host
-PG_HOST=localhost
-PG_PORT=5432
-PG_ADMIN_USER=postgres
-PG_ADMIN_PASS=postgres
+Startup menginisialisasi database master `pagila`/`classicmodels`, dataset yang diperlukan, role terbatas dan ACL. `sandbox_pribadi` adalah pilihan database virtual; **jangan membuat database fisik atau menjalankan GRANT manual lama**. Script opsional [setup_postgres.sql](setup_postgres.sql) hanya menyiapkan dua master; aplikasi mengurus role/ACL. Jangan mengimpor ulang dataset sebagai pemeriksaan rutin karena dapat mengganti data.
 
-# Kredensial Terbatas Mahasiswa (student_role)
-PG_STUDENT_USER=student_user
-PG_STUDENT_PASS=student_pass
+## Menjalankan kembali dan upgrade
 
-# Password Master Portal Pengawas / Dosen
-ADMIN_MASTER_KEY=admin123
-```
+Pada terminal baru, atur kembali koneksi PostgreSQL, masuk folder proyek, lalu `run.bat` di Windows atau `bash run.sh` di macOS/Linux. Master key bootstrap tidak perlu diatur ulang. Jika `.venv` lama menggunakan Python 3.10, buat ulang virtual environment dengan Python 3.11+ tanpa menghapus database ujian. Untuk upgrade, hentikan server, buat backup lengkap, perbarui dependensi dan jalankan setup/migrasi. Setup mempertahankan skor dan membuat snapshot SQLite sebelum migrasi versi lama; snapshot itu bukan backup PostgreSQL/unggahan.
 
----
+Port runner adalah 8000. `APP_PORT`/`APP_HOST` bukan opsi yang dibaca runner. Untuk menjalankan manual pada port lain gunakan Python `.venv` dan argumen Uvicorn:
 
-## 5. Konfigurasi Database PostgreSQL Master
-
-Buka `psql` atau terminal query PostgreSQL dengan akun superuser (`postgres`):
-
-```sql
--- 1. Buat role terbatas untuk mahasiswa (hanya SELECT di master DB, DDL di sandbox pribadi)
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'student_role') THEN
-        CREATE ROLE student_role WITH LOGIN PASSWORD 'student_pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-    END IF;
-END $$;
-
--- 2. Buat database master ujian
-CREATE DATABASE pagila;
-CREATE DATABASE classicmodels;
-CREATE DATABASE sandbox_pribadi;
-
--- 3. Berikan hak akses terbatas ke student_role pada seluruh database master
-\connect pagila
-GRANT CONNECT ON DATABASE pagila TO student_role;
-GRANT USAGE ON SCHEMA public TO student_role;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO student_role;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO student_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO student_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO student_role;
-
-\connect classicmodels
-GRANT CONNECT ON DATABASE classicmodels TO student_role;
-GRANT USAGE ON SCHEMA public TO student_role;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO student_role;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO student_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO student_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO student_role;
-
-\connect sandbox_pribadi
-GRANT CONNECT ON DATABASE sandbox_pribadi TO student_role;
-GRANT USAGE ON SCHEMA public TO student_role;
-```
-
-### Inisialisasi Dataset Awal:
-Dataset dapat dimuat via CLI atau menggunakan tombol **Reset Database** pada Portal Pengawas (`/admin`):
 ```bash
-# Inisialisasi database classicmodels
-psql -U postgres -d classicmodels -f data/classicmodels.sql
-
-# Inisialisasi database pagila dari direktori berversi
-psql -U postgres -d pagila -f data/pagila-0.10.1/pagila-schema.sql
-psql -U postgres -d pagila -f data/pagila-0.10.1/pagila-data.sql
+python -m uvicorn main:app --no-proxy-headers --host 0.0.0.0 --port 8000
 ```
 
----
+Perintah manual mengasumsikan virtual environment sudah diaktifkan. Jangan memakai `--reload` atau menambah worker untuk ujian tanpa pengujian arsitektur dan kapasitas.
 
-## 6. Menjalankan Server Ujian
+## Pemeriksaan setelah startup
 
-### Opsi A: Menggunakan Script Runner Otomatis (Direkomendasikan)
-Runner script otomatis mendeteksi/membuat `.venv`, menginstal dependensi jika belum ada, dan menjalankan server tanpa mode `--reload`:
-* **Windows (CMD):** Klik ganda `run.bat` atau jalankan `run.bat` di terminal.
-* **Windows (PowerShell):** Jalankan `.\run.ps1`.
-* **Linux / macOS:** Jalankan `chmod +x run.sh && ./run.sh`.
+1. Baca output startup; URL yang tercetak saja belum membuktikan semua pemeriksaan berhasil. Periksa `/health` dan `/ready`.
+2. Buka `http://localhost:8000/admin`, login dan periksa Database tanpa menekan Reset sebagai tes koneksi.
+3. Atur soal/paket saat persiapan, gunakan IDE Pengujian, lalu gladi bersih login–lobby–mulai–submit–stop pada perangkat peserta.
+4. Peserta mengakses `http://IP-LAPTOP-SERVER:8000`. Izinkan inbound Python/port 8000 pada jaringan ujian; PostgreSQL tidak perlu dibuka ke perangkat peserta.
+5. Hentikan server dengan Ctrl+C. Jangan membiarkan laptop tidur saat dipakai sebagai server.
 
-### Opsi B: Menjalankan Manual melalui Terminal:
-Pastikan virtual environment telah aktif:
-```bash
-# Windows
-.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
-
-# Linux / macOS
-.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
-```
-> **Catatan Stabilitas Ujian:** Jangan menyertakan argumen `--reload` saat ujian berlangsung demi menjaga stabilitas worker dan menghindari restart server yang tidak diinginkan.
-
----
-
-## 7. Verifikasi Operasional Server
-
-1. **Akses Portal Mahasiswa:**
-   Buka browser dan buka `http://localhost:8000/login`. Pastikan formulir login mahasiswa tampil rapi.
-2. **Akses Portal Pengawas / Dosen:**
-   Buka `http://localhost:8000/admin/login`. Masukkan Master Key (default: `admin123`).
-3. **Pemeriksaan Tab Database Pengawas:**
-   Klik tab **Database**, pilih `pagila`, klik **Reset Database**. Pastikan preview skema tabel berhasil dimuat.
-4. **Pemeriksaan Utilitas CLI:**
-   Jalankan pemeriksaan statistik sesi ujian:
-   ```bash
-   python scripts/reset_exam_session.py --check
-   ```
+Rincian pelaksanaan: [SOP pengawas](docs/operations/OPERATIONS_GUIDE.md). Backup dan restore: [kesiapan operasional](docs/operations/RELEASE_READINESS.md). Tes otomatis memakai database sementara: [pengujian](docs/operations/TESTING.md).

@@ -12,7 +12,7 @@ if %errorlevel% neq 0 (
     where py >nul 2>nul
     if %errorlevel% neq 0 (
         echo [ERROR] Python tidak ditemukan di PATH sistem Windows!
-        echo Silakan unduh dan pasang Python 3.10+ dari https://www.python.org/
+        echo Silakan unduh dan pasang Python 3.11+ dari https://www.python.org/
         pause
         exit /b 1
     ) else (
@@ -69,5 +69,5 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr /i ":8000" ^| findstr /i "LIS
 )
 
 :: 5. Menjalankan server FastAPI (tanpa --reload demi stabilitas penuh ujian)
-%PY_CMD% -m uvicorn main:app --host 0.0.0.0 --port 8000
+%PY_CMD% -m uvicorn main:app --no-proxy-headers --host 0.0.0.0 --port 8000
 pause

@@ -1,3 +1,32 @@
+const adminFetch = window.fetch.bind(window);
+const adminReadVersions = new Map();
+let lastAdminAccessWarning=-Infinity;
+window.fetch = async function(input, options = {}) {
+    const target = new URL(typeof input === "string" ? input : input.url, window.location.href);
+    const method = (options.method || input.method || "GET").toUpperCase();
+    if (target.origin === window.location.origin && target.pathname.startsWith("/api/admin/") && !["GET", "HEAD"].includes(method)) {
+        const headers = new Headers(options.headers || input.headers);
+        headers.set("X-CSRF-Token", document.querySelector('meta[name="admin-csrf-token"]')?.content || "");
+        options = { ...options, headers };
+    }
+    const adminRequest=target.origin===window.location.origin && target.pathname.startsWith('/api/admin/');
+    const readKey=adminRequest && method==='GET' ? target.pathname : null;
+    const ticket=readKey ? (adminReadVersions.get(readKey)||0)+1 : 0;
+    if (readKey) adminReadVersions.set(readKey,ticket);
+    const response=await adminFetch(input, options);
+    if (readKey && adminReadVersions.get(readKey)!==ticket) throw new Error('Respons lama diabaikan.');
+    if (adminRequest && !response.ok) {
+        const data=await (response.clone ? response.clone() : response).json().catch(()=>({}));
+        if (response.status===403 && Date.now()-lastAdminAccessWarning>30000) {
+            lastAdminAccessWarning=Date.now();
+            showToast('Akses admin ditolak. Muat ulang atau login kembali.','warning');
+            if (String(data.detail).toLowerCase().startsWith('akses ditolak') && typeof window.location.assign==='function') window.location.assign('/admin/login');
+        }
+        throw new Error(typeof data.detail==='string' ? data.detail : 'Permintaan admin gagal.');
+    }
+    return response;
+};
+
 /**
 
  * Offline SQL Exam System - Admin Dashboard Controller
@@ -364,7 +393,7 @@ function updateExamStateBadge(state) {
 
         if (badge) {
 
-            badge.textContent = "Menunggu";
+            badge.textContent = state === "finished" ? "Selesai" : "Menunggu";
 
             badge.className = "status-badge badge-warning";
 
@@ -392,6 +421,7 @@ async function startExam() {
 
         const data = await res.json();
 
+        if (!res.ok) throw new Error(data.detail || "Permintaan ditolak.");
         showToast(data.message || "Ujian dimulai.", "success");
 
         updateExamStateBadge("active");
@@ -425,9 +455,10 @@ async function stopExam() {
 
         const data = await res.json();
 
+        if (!res.ok) throw new Error(data.detail || "Permintaan ditolak.");
         showToast(data.message || "Ujian dihentikan.", "success");
 
-        updateExamStateBadge("waiting");
+        updateExamStateBadge(data.state || "finished");
 
         loadWaitingRoomPanel();
 
@@ -613,10 +644,10 @@ async function loadDashboardData() {
                     <td>${cheatBadge}</td>
 
                     <td style="text-align: right; white-space: nowrap;">
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="clearStudentSessionLock('${escapeHtml(s.nim)}', '${escapeHtml(s.name)}')" title="Bebaskan kunci sesi perangkat agar mahasiswa dapat login kembali tanpa kehilangan data">
+                        <button type="button" class="btn btn-secondary btn-sm" data-admin-action="unlock" data-nim="${escapeHtml(s.nim)}" data-name="${escapeHtml(s.name)}" title="Bebaskan kunci sesi perangkat agar mahasiswa dapat login kembali tanpa kehilangan data">
                             Bebaskan Sesi
                         </button>
-                        <button type="button" class="btn btn-warning btn-sm" style="margin-left: 0.35rem;" onclick="resetStudentCategory('${escapeHtml(s.nim)}', '${escapeHtml(s.name)}')" title="Reset pilihan paket soal mahasiswa agar dapat memilih ulang">
+                        <button type="button" class="btn btn-warning btn-sm" style="margin-left: 0.35rem;" data-admin-action="reset-package" data-nim="${escapeHtml(s.nim)}" data-name="${escapeHtml(s.name)}" title="Reset pilihan paket soal mahasiswa agar dapat memilih ulang">
                             Reset Paket
                         </button>
                     </td>
@@ -1047,13 +1078,13 @@ function renderPackageCards() {
 
                     <div style="display: flex; gap: 0.3rem;">
 
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="openEditPackageModal('${escapeHtml(p.code)}')" title="Edit detail paket" style="padding: 2px 7px; font-size: 0.72rem; line-height: 1;">
+                        <button type="button" class="btn btn-secondary btn-sm" data-admin-action="edit-package" data-code="${escapeHtml(p.code)}" title="Edit detail paket" style="padding: 2px 7px; font-size: 0.72rem; line-height: 1;">
 
                             Edit
 
                         </button>
 
-                        <button type="button" class="btn btn-danger btn-sm" onclick="confirmDeletePackage('${escapeHtml(p.code)}', ${p.total_questions ?? p.question_count ?? 0}, ${p.total_students ?? p.student_count ?? 0})" title="Hapus paket soal ini" style="padding: 2px 7px; font-size: 0.72rem; line-height: 1;">
+                        <button type="button" class="btn btn-danger btn-sm" data-admin-action="delete-package" data-code="${escapeHtml(p.code)}" data-questions="${p.total_questions ?? p.question_count ?? 0}" data-students="${p.total_students ?? p.student_count ?? 0}" title="Hapus paket soal ini" style="padding: 2px 7px; font-size: 0.72rem; line-height: 1;">
 
                             Hapus
 
@@ -1089,7 +1120,7 @@ function renderPackageCards() {
 
                     </div>
 
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="filterByPackage('${escapeHtml(p.code)}')" style="padding: 2px 8px; font-size: 0.72rem; ${isFiltered ? 'background: #6366f1; color: #fff; border-color: #6366f1;' : ''}">
+                    <button type="button" class="btn btn-secondary btn-sm" data-admin-action="filter-package" data-code="${escapeHtml(p.code)}" style="padding: 2px 8px; font-size: 0.72rem; ${isFiltered ? 'background: #6366f1; color: #fff; border-color: #6366f1;' : ''}">
 
                         ${isFiltered ? 'Menampilkan' : 'Filter'}
 
@@ -1192,6 +1223,7 @@ function openEditPackageModal(code) {
     document.getElementById("modal-pkg-active").checked = Boolean(pkg.is_active);
 
     modal.dataset.mode = "edit";
+    modal.dataset.editRevision = pkg.edit_revision;
 
     modal.style.display = "flex";
 
@@ -1263,7 +1295,7 @@ async function savePackageForm(e) {
 
                 headers: { "Content-Type": "application/json" },
 
-                body: JSON.stringify({ name, description, is_active })
+                body: JSON.stringify({ name, description, is_active, expected_edit_revision: modal.dataset.editRevision })
 
             });
 
@@ -1305,7 +1337,7 @@ async function savePackageForm(e) {
 
         console.error("Save package error:", err);
 
-        showToast("Terjadi kesalahan jaringan saat menyimpan paket soal.", "danger");
+        showToast(err.message || "Terjadi kesalahan jaringan saat menyimpan paket soal.", "danger");
 
     } finally {
 
@@ -1355,7 +1387,8 @@ async function confirmDeletePackage(code, totalQuestions, totalStudents) {
 
     try {
 
-        const url = `/api/admin/packages/${encodeURIComponent(code)}${deleteQuestions ? "?delete_questions=true" : ""}`;
+        const revision=packagesList.find(p=>p.code===code)?.edit_revision || '';
+        const url = `/api/admin/packages/${encodeURIComponent(code)}?delete_questions=${deleteQuestions}&expected_edit_revision=${encodeURIComponent(revision)}`;
 
         const res = await fetch(url, { method: "DELETE" });
 
@@ -1498,27 +1531,19 @@ function renderQuestionsTable() {
 
 
 function updateNextQuestionNumber() {
-
-    const qId = document.getElementById("modal-q-id")?.value;
-
-    const catSelect = document.getElementById("modal-q-category");
-
-    const numInput = document.getElementById("modal-q-num");
-
-    if (!qId && catSelect && numInput) {
-
-        const cat = catSelect.value || "A";
-
-        const catQuestions = questionsList.filter(q => (q.category || "A") === cat);
-
-        const maxNum = catQuestions.reduce((max, q) => Math.max(max, q.question_number || 0), 0);
-
-        numInput.value = maxNum + 1;
-
+    const idInput = document.getElementById("modal-q-id");
+    const category = document.getElementById("modal-q-category");
+    const number = document.getElementById("modal-q-num");
+    if (!category || !number) return;
+    const target = (category.value || "A").toUpperCase();
+    if (idInput?.value && target === idInput.dataset.originalCategory) {
+        number.value = idInput.dataset.originalNumber;
+        return;
     }
-
+    const numbers = questionsList.filter(q => (q.category || "A").toUpperCase() === target && String(q.id) !== idInput?.value)
+        .map(q => Number(q.question_number) || 0);
+    number.value = Math.max(0, ...numbers) + 1;
 }
-
 
 
 function openAddQuestionModal() {
@@ -1586,6 +1611,9 @@ function openEditQuestionModal(qId) {
     document.getElementById("q-modal-title").textContent = `Edit Soal #${q.question_number} (Paket ${q.category || "A"})`;
 
     document.getElementById("modal-q-id").value = q.id;
+    document.getElementById("modal-q-id").dataset.editRevision = q.edit_revision;
+    document.getElementById("modal-q-id").dataset.originalCategory = (q.category || "A").toUpperCase();
+    document.getElementById("modal-q-id").dataset.originalNumber = q.question_number;
 
     const catSelect = document.getElementById("modal-q-category");
     if (catSelect && packagesList && packagesList.length > 0) {
@@ -1671,6 +1699,7 @@ async function saveQuestionForm(e) {
     const payload = {
 
         question_id: qId ? parseInt(qId) : null,
+        expected_edit_revision: qId ? Number(document.getElementById("modal-q-id").dataset.editRevision) : null,
 
         category: (document.getElementById("modal-q-category")?.value || "A").trim().toUpperCase(),
 
@@ -1730,7 +1759,7 @@ async function saveQuestionForm(e) {
 
         } else {
 
-            showToast(data.message || "Gagal menyimpan soal.", "danger");
+            showToast(data.detail || data.message || "Gagal menyimpan soal.", "warning");
 
         }
 
@@ -1750,11 +1779,11 @@ async function deleteQuestion(qId) {
 
     try {
 
-        const res = await fetch(`/api/admin/questions/${qId}`, { method: "DELETE" });
+        const res = await fetch(`/api/admin/questions/${qId}?expected_edit_revision=${questionsList.find(q => q.id === qId)?.edit_revision || 0}`, { method: "DELETE" });
 
         const data = await res.json();
 
-        showToast(data.message || "Soal berhasil dihapus.");
+        showToast(data.detail || data.message || (res.ok ? "Soal berhasil dihapus." : "Gagal menghapus soal."), res.ok ? "success" : "warning");
 
         loadQuestionsData();
 
@@ -2409,9 +2438,9 @@ async function handleChangePassword(e) {
 
 
 
-    if (newPw.length < 4) {
+    if (newPw.length < 12) {
 
-        showAlert("Password baru minimal 4 karakter!");
+        showAlert("Password baru minimal 12 karakter!");
 
         return;
 
@@ -2446,6 +2475,7 @@ async function handleChangePassword(e) {
             showAlert("Password master admin berhasil diperbarui!", true);
 
             showToast("Password master admin berhasil diperbarui!", "success");
+            window.location.reload();
 
             setTimeout(() => {
 
@@ -2501,7 +2531,7 @@ function renderQuestionDiagramsGallery() {
     container.innerHTML = currentQuestionDiagrams.map((url, idx) => `
         <div class="gallery-item-card" title="Klik untuk membuka ukuran penuh">
             <span class="gallery-item-badge">#${idx + 1}</span>
-            <img src="${escapeHtml(url)}" alt="Diagram Soal ${idx + 1}" class="gallery-item-thumb" onclick="window.open('${escapeHtml(url)}', '_blank')">
+            <img src="${escapeHtml(url)}" alt="Diagram Soal ${idx + 1}" class="gallery-item-thumb" data-admin-action="open-image" data-url="${escapeHtml(url)}">
             <button type="button" class="gallery-item-remove" onclick="removeQuestionDiagram(${idx})" title="Hapus gambar ini">✕</button>
         </div>
     `).join("");
@@ -2530,7 +2560,7 @@ function renderQuestionOutputGallery() {
     container.innerHTML = currentQuestionOutputImages.map((url, idx) => `
         <div class="gallery-item-card" title="Klik untuk membuka ukuran penuh">
             <span class="gallery-item-badge">#${idx + 1}</span>
-            <img src="${escapeHtml(url)}" alt="Output Tabel ${idx + 1}" class="gallery-item-thumb" onclick="window.open('${escapeHtml(url)}', '_blank')">
+            <img src="${escapeHtml(url)}" alt="Output Tabel ${idx + 1}" class="gallery-item-thumb" data-admin-action="open-image" data-url="${escapeHtml(url)}">
             <button type="button" class="gallery-item-remove" onclick="removeQuestionOutputImage(${idx})" title="Hapus screenshot ini">✕</button>
         </div>
     `).join("");
@@ -2572,7 +2602,7 @@ async function handleQuestionDiagramsUpload(e) {
             showToast(data.detail || "Gagal mengunggah gambar soal.", "danger");
         }
     } catch (err) {
-        showToast("Error saat mengunggah file gambar soal.", "danger");
+        showToast(err.message || "Error saat mengunggah file gambar soal.", "danger");
     } finally {
         e.target.value = "";
     }
@@ -2607,7 +2637,7 @@ async function handleQuestionOutputImagesUpload(e) {
             showToast(data.detail || "Gagal mengunggah screenshot output.", "danger");
         }
     } catch (err) {
-        showToast("Error saat mengunggah screenshot output.", "danger");
+        showToast(err.message || "Error saat mengunggah screenshot output.", "danger");
     } finally {
         e.target.value = "";
     }
@@ -2656,3 +2686,21 @@ window.removeQuestionOutputImage = removeQuestionOutputImage;
 window.handleQuestionImageUpload = handleQuestionImageUpload;
 window.clearQuestionImage = clearQuestionImage;
 
+
+document.addEventListener('click',event=>{
+    const button=event.target.closest('[data-admin-action]');
+    if (!button) return;
+    const d=button.dataset;
+    const actions={
+        unlock:()=>clearStudentSessionLock(d.nim,d.name),
+        'reset-package':()=>resetStudentCategory(d.nim,d.name),
+        'edit-package':()=>openEditPackageModal(d.code),
+        'delete-package':()=>confirmDeletePackage(d.code,Number(d.questions),Number(d.students)),
+        'filter-package':()=>filterByPackage(d.code),
+        'open-image':()=>{
+            const url=new URL(d.url,window.location.href);
+            if(['http:','https:'].includes(url.protocol)) window.open(url.href,'_blank','noopener,noreferrer');
+        }
+    };
+    if(actions[d.adminAction]) actions[d.adminAction]();
+});

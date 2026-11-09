@@ -39,6 +39,7 @@
             {% endif %}
 
             <form method="POST" action="/admin/login" id="admin-login-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="form-group">
                     <label for="master_key" class="form-label">Master Key</label>
                     <input type="password" id="master_key" name="master_key"

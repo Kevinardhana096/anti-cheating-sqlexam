@@ -27,8 +27,18 @@ let pendingCategorySelection = null;
 let heartbeatInterval = null;
 let isLoggingOut = false;
 
+function studentFetch(url, options = {}) {
+    if (document.body.dataset.adminPractice === "true") {
+        url = url.replace("/api/student/", "/api/admin/practice/");
+        const headers = new Headers(options.headers || {});
+        headers.set("X-CSRF-Token", document.querySelector('meta[name="admin-csrf-token"]').content);
+        options = { ...options, headers };
+    }
+    return fetch(url, options);
+}
+
 function isUserLoggingOut() {
-    return isLoggingOut || Boolean(window.isLoggingOut);
+    return isLoggingOut || Boolean(window.isLoggingOut) || Boolean(window._examAccessClosed);
 }
 
 // ==============================================================================
@@ -76,7 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupAntiCheat();
     setupExitModal();
     loadQuestions();
-    initDatabaseSelector();
+    if (studentCategory) initDatabaseSelector();
     initImageLightbox();
     initNetworkMonitor();
     startHeartbeat();
@@ -89,6 +99,13 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("btn-run-query").addEventListener("click", runQuery);
     document.getElementById("btn-submit-answer").addEventListener("click", submitAnswer);
     document.getElementById("btn-format-sql")?.addEventListener("click", formatQuery);
+    document.getElementById("btn-practice-reset-package")?.addEventListener("click", async () => {
+        try {
+            const response = await studentFetch("/api/student/reset-package", { method: "POST" });
+            if (!response.ok) throw new Error("Pilihan paket belum dapat direset. Muat ulang halaman.");
+            window.location.reload();
+        } catch (error) { showToast(error.message, "warning"); }
+    });
 });
 
 // ==============================================================================
@@ -236,46 +253,103 @@ function setNetworkState(isOnline, reason = "") {
     }
 }
 
-async function checkNetworkNow() {
-    const badge = document.getElementById("network-status-badge");
-    const textEl = document.getElementById("network-status-text");
-    if (!isNetworkOnline && textEl) {
-        textEl.textContent = "Menghubungkan...";
-        if (badge) badge.className = "status-badge badge-warning";
-    }
+let heartbeatProbe = null;
+let lastBusyNotice = 0;
 
+function checkNetworkNow() {
+    if (heartbeatProbe) return heartbeatProbe;
+    heartbeatProbe = probeStudentHeartbeat().finally(() => { heartbeatProbe = null; });
+    return heartbeatProbe;
+}
+
+async function probeStudentHeartbeat() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const res = await fetch("/api/student/heartbeat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                nim: studentNim,
-                session_token: studentSessionToken
-            }),
+        const response = await studentFetch("/api/student/heartbeat", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nim: studentNim, session_token: studentSessionToken }),
             signal: controller.signal
         });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-            const data = await res.json();
-            if (data.valid) {
-                setNetworkState(true);
-                return true;
-            }
+        const data = await response.json();
+        if (response.status === 401 || (response.ok && data.valid === false)) {
+            clearInterval(heartbeatInterval);
+            showKickModal(data.reason || data.detail || "Sesi sudah tidak aktif. Silakan login kembali.");
+            return false;
         }
-        setNetworkState(false, "Server ujian tidak merespon.");
+        if (leaveInactiveExam(data.exam_state)) return false;
+        if (response.status === 429) {
+            consecutiveHeartbeatFailures = 0;
+            setNetworkState(true);
+            if (Date.now() - lastBusyNotice > 30000) {
+                lastBusyNotice = Date.now();
+                showToast("Server sibuk. Pemeriksaan sesi akan dicoba lagi.", "warning");
+            }
+            return false;
+        }
+        if (!response.ok || data.valid !== true) throw new Error(`Heartbeat HTTP ${response.status}`);
+        consecutiveHeartbeatFailures = 0;
+        setNetworkState(true);
+        if (studentCategory && !data.selected_category) {
+            studentCategory = "";
+            updateHeaderPackageBadge(null);
+            showToast("Pilihan paket di-reset pengawas. Silakan pilih paket baru.", "info");
+            loadQuestions();
+        }
+        return true;
+    } catch (error) {
+        consecutiveHeartbeatFailures++;
+        console.warn(`[Heartbeat] Probe failed (${consecutiveHeartbeatFailures}):`, error.name);
+        if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE || !navigator.onLine) {
+            setNetworkState(false, "Koneksi ke server belum tersedia. Draf tetap tersimpan di perangkat ini.");
+        }
         return false;
-    } catch (e) {
-        setNetworkState(false, "Gagal menghubungi server ujian.");
-        return false;
+    } finally {
+        clearTimeout(timeout);
     }
 }
 
 window.checkNetworkNow = checkNetworkNow;
 window.setNetworkState = setNetworkState;
 window.getIsNetworkOnline = () => isNetworkOnline;
+
+function formatQuery() {
+    if (!editor || editor.getOption("readOnly")) return;
+    const selected = editor.somethingSelected();
+    const original = selected ? editor.getSelection() : editor.getValue();
+    if (!original.trim()) return;
+    if (!window.sqlFormatter?.format) {
+        showToast("Formatter belum tersedia. Muat ulang halaman; draf tetap tersimpan.", "warning");
+        return;
+    }
+    try {
+        const options = { language: "postgresql", keywordCase: "upper", tabWidth: 4, linesBetweenQueries: 1 };
+        const fullText = editor.getValue();
+        if (fullText.length > 50000 || editor.listSelections().length !== 1) {
+            showToast("Pilih satu bagian SQL dengan panjang maksimal 50.000 karakter.", "warning");
+            return;
+        }
+        const formatted = window.sqlFormatter.format(original, options);
+        if (selected) {
+            const from = editor.indexFromPos(editor.getCursor("from"));
+            const to = editor.indexFromPos(editor.getCursor("to"));
+            const candidate = fullText.slice(0, from) + formatted + fullText.slice(to);
+            if (window.sqlFormatter.format(fullText, options) !== window.sqlFormatter.format(candidate, options)) {
+                showToast("Pilih bagian SQL lengkap di luar literal atau komentar. Teks asli tetap dipertahankan.", "warning");
+                return;
+            }
+        }
+        editor.operation(() => {
+            if (selected) editor.replaceSelection(formatted, "around", "+format");
+            else editor.replaceRange(formatted, { line: 0, ch: 0 }, { line: editor.lastLine(), ch: editor.getLine(editor.lastLine()).length }, "+format");
+        });
+        editor.focus();
+        triggerDebouncedAutosave();
+        showToast(selected ? "Bagian SQL yang dipilih sudah dirapikan." : "SQL sudah dirapikan.", "info");
+    } catch (error) {
+        showToast("Bagian SQL ini belum dapat diformat. Teks asli tetap dipertahankan.", "warning");
+    }
+}
 
 // 1. CodeMirror SQL Editor Initialization
 // ==============================================================================
@@ -433,6 +507,14 @@ function _registerInternalCopy(text) {
     }
 }
 
+let examFocusAway = false;
+function recordExamFocus(away) {
+    if (isUserLoggingOut() || examFocusAway === away) return;
+    examFocusAway = away;
+    if (away) showToast("Perpindahan fokus dicatat oleh sistem.", "warning");
+    logCheatingAction(away ? "blur_tab" : "focus_tab", away ? "Fokus keluar dari halaman ujian" : "Fokus kembali ke halaman ujian");
+}
+
 function setupAntiCheat() {
     // 1. Prevent DevTools shortcuts & Inspect Element
     document.addEventListener("keydown", (e) => {
@@ -524,21 +606,9 @@ function setupAntiCheat() {
         }
     });
 
-    // 4. Detect tab/window switches
-    document.addEventListener("visibilitychange", () => {
-        if (isUserLoggingOut()) return;
-        if (document.hidden) {
-            showToast("Peringatan: Berpindah tab atau aplikasi dicatat oleh sistem!", "danger");
-            logCheatingAction("blur_tab", "Mahasiswa memindahkan fokus tab atau keluar jendela ujian");
-        } else {
-            logCheatingAction("focus_tab", "Mahasiswa kembali ke jendela ujian");
-        }
-    });
-
-    window.addEventListener("blur", () => {
-        if (isUserLoggingOut()) return;
-        logCheatingAction("blur_tab", "Window blur terdeteksi");
-    });
+    document.addEventListener("visibilitychange", () => recordExamFocus(document.hidden || !document.hasFocus()));
+    window.addEventListener("blur", () => recordExamFocus(true));
+    window.addEventListener("focus", () => recordExamFocus(document.hidden));
 
     // 5. Fullscreen Guard & Enforcement
     setupFullscreenGuard();
@@ -692,7 +762,7 @@ function setupExitModal() {
 
 async function logCheatingAction(actionType, details) {
     try {
-        await fetch("/api/student/log-event", {
+        await studentFetch("/api/student/log-event", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -710,51 +780,39 @@ async function logCheatingAction(actionType, details) {
 // ==============================================================================
 // 3. Heartbeat & Anti-Joki Session Monitoring
 // ==============================================================================
+function leaveInactiveExam(state) {
+    if (!state || state === "active") return false;
+    const question = questionsData[currentQuestionIndex];
+    if (editor && question) saveLocalDraft(studentNim, question.id, editor.getValue());
+    isLoggingOut = true;
+    window.isLoggingOut = true;
+    clearInterval(heartbeatInterval);
+    if (editor) editor.setOption("readOnly", "nocursor");
+    window.location.replace("/waiting");
+    return true;
+}
+
+function handleExamAccessResponse(response, data) {
+    if (response.status === 401) {
+        showKickModal(data.detail || "Sesi berakhir. Silakan login kembali.");
+        return false;
+    }
+    if (leaveInactiveExam(data.exam_state)) return false;
+    if (!response.ok) {
+        showToast(data.detail || "Permintaan ditolak oleh server.", "warning");
+        return false;
+    }
+    return true;
+}
+
 function startHeartbeat() {
-    heartbeatInterval = setInterval(async () => {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
-            const res = await fetch("/api/student/heartbeat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    nim: studentNim,
-                    session_token: studentSessionToken
-                }),
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-
-            const data = await res.json();
-            consecutiveHeartbeatFailures = 0;
-            if (!isNetworkOnline) {
-                setNetworkState(true);
-            }
-
-            if (!data.valid) {
-                clearInterval(heartbeatInterval);
-                showKickModal(data.reason || "NIM Anda sedang diakses dari perangkat lain!");
-            } else {
-                // Deteksi jika paket soal di-reset oleh pengawas
-                if (studentCategory && !data.selected_category) {
-                    studentCategory = "";
-                    updateHeaderPackageBadge(null);
-                    showToast("Pilihan paket soal Anda telah di-reset oleh pengawas. Silakan pilih paket baru.", "warning");
-                    loadQuestions();
-                }
-            }
-        } catch (err) {
-            consecutiveHeartbeatFailures++;
-            console.warn(`[Heartbeat] Probe failed (${consecutiveHeartbeatFailures}/${MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE}):`, err);
-            if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILS_BEFORE_OFFLINE || !navigator.onLine) {
-                setNetworkState(false, "Koneksi ke server ujian terputus!");
-            }
-        }
-    }, 12000); // Check every 12 seconds
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = setInterval(() => { checkNetworkNow(); }, 12000);
 }
 
 function showKickModal(message) {
+    if (document.getElementById("kick-modal")) return;
+    window._examAccessClosed = true;
     if (editor) {
         editor.setOption("readOnly", "nocursor");
     }
@@ -762,15 +820,14 @@ function showKickModal(message) {
         <div class="modal-backdrop is-active" id="kick-modal" role="dialog" aria-modal="true" style="display: flex;">
             <div class="modal-dialog">
                 <div class="modal-header">
-                    <h3 style="color: #ef4444;">Sesi Ditangguhkan (Kicked)</h3>
+                    <h3 style="color: #ef4444;">Sesi Tidak Aktif</h3>
                 </div>
                 <div class="modal-body">
                     <div class="alert-box alert-danger">
                         ${escapeHtml(message)}
                     </div>
                     <p style="margin-top: 0.5rem; color: #cbd5e1;">
-                        Sistem mendeteksi aktivitas login baru dengan NIM Anda di perangkat lain atau IP yang berbeda.
-                        Untuk menjaga integritas ujian, sesi pada perangkat ini telah dinonaktifkan.
+                        Sesi pada perangkat ini sudah tidak berlaku. Silakan login kembali atau hubungi pengawas.
                     </p>
                 </div>
                 <div class="modal-footer">
@@ -787,8 +844,9 @@ function showKickModal(message) {
 // ==============================================================================
 async function loadQuestions() {
     try {
-        const res = await fetch(`/api/student/questions?token=${encodeURIComponent(studentSessionToken)}`);
+        const res = await studentFetch("/api/student/questions");
         const data = await res.json();
+        if (!handleExamAccessResponse(res, data)) return;
 
         // Mahasiswa belum mengunci paket soal
         if (data.needs_category_selection) {
@@ -910,7 +968,7 @@ async function confirmPackageSelection() {
     }
 
     try {
-        const res = await fetch("/api/student/select-category", {
+        const res = await studentFetch("/api/student/select-category", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -920,12 +978,14 @@ async function confirmPackageSelection() {
             })
         });
         const data = await res.json();
+        if (!handleExamAccessResponse(res, data)) return;
         if (res.ok && data.status === "success") {
             studentCategory = cat;
+            initDatabaseSelector();
             hideCategorySelectionModal();
             updateHeaderPackageBadge(cat);
             questionsData = data.questions || [];
-            submissionsMap = {};
+            submissionsMap = data.submissions || {};
             renderQuestionNav();
             selectQuestion(0);
             showToast(`Paket ${cat} berhasil dikunci! Selamat mengerjakan ujian.`, "success");
@@ -1102,13 +1162,14 @@ function selectQuestion(idx) {
     let queryToLoad = "";
     let isFromDraft = false;
 
-    if (existingSubmission && existingSubmission.submitted_query) {
+    const latestQuery = existingSubmission?.latest_attempt?.submitted_query || existingSubmission?.submitted_query;
+    if (latestQuery) {
         // If there is an active local draft that differs from submitted query, prefer local draft
-        if (localDraft && localDraft.query && localDraft.query.trim() !== existingSubmission.submitted_query.trim()) {
+        if (localDraft && localDraft.query && localDraft.query.trim() !== latestQuery.trim()) {
             queryToLoad = localDraft.query;
             isFromDraft = true;
         } else {
-            queryToLoad = existingSubmission.submitted_query;
+            queryToLoad = latestQuery;
         }
     } else if (localDraft && localDraft.query !== undefined) {
         queryToLoad = localDraft.query;
@@ -1131,41 +1192,7 @@ function selectQuestion(idx) {
         updateAutosaveUI("saved");
     }
 
-    // Update submission indicator tag & autograder banner
-    const subTag = document.getElementById("submission-status-tag");
-    const autoBanner = document.getElementById("autograder-banner");
-    if (existingSubmission) {
-        const isCorrect = existingSubmission.is_correct === 1;
-        const score = existingSubmission.score || 0;
-        const maxScore = q.score_weight || 20;
-
-        if (isCorrect) {
-            if (subTag) {
-                subTag.className = "status-badge badge-online";
-                subTag.textContent = "🟢 Terjawab";
-            }
-        } else {
-            if (subTag) {
-                subTag.className = "status-badge badge-danger";
-                subTag.textContent = "🔴 Perlu Perbaikan";
-            }
-        }
-
-        if (existingSubmission.feedback) {
-            renderAutograderBanner(isCorrect, score, maxScore, existingSubmission.feedback);
-        } else if (autoBanner) {
-            autoBanner.style.display = "none";
-        }
-    } else {
-        if (subTag) {
-            subTag.className = "status-badge badge-warning";
-            subTag.textContent = "Belum Disubmit";
-        }
-        if (autoBanner) {
-            autoBanner.style.display = "none";
-            autoBanner.className = "autograder-banner";
-        }
-    }
+    renderSubmissionState(q, existingSubmission);
 }
 
 // ==============================================================================
@@ -1204,7 +1231,7 @@ async function runQuery(forcePartial = false) {
 
     try {
         const currentActiveDb = getActiveDatabase();
-        const res = await fetch("/api/student/run-query", {
+        const res = await studentFetch("/api/student/run-query", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1215,6 +1242,7 @@ async function runQuery(forcePartial = false) {
             })
         });
         const data = await res.json();
+        if (!handleExamAccessResponse(res, data)) return;
 
         if (data.success) {
             renderResultTable(data.columns, data.rows, data.row_count, data.is_truncated);
@@ -1247,63 +1275,50 @@ async function runQuery(forcePartial = false) {
     }
 }
 
+function renderSubmissionState(question, submission) {
+    const tag = document.getElementById("submission-status-tag");
+    const banner = document.getElementById("autograder-banner");
+    if (!submission) {
+        if (tag) { tag.className = "status-badge badge-warning"; tag.textContent = "Belum Disubmit"; }
+        if (banner) banner.style.display = "none";
+        return;
+    }
+    const latest = submission.latest_attempt || submission;
+    const pending = latest.graded === 0 || latest.graded === false || latest.is_correct === null;
+    if (pending) {
+        if (tag) { tag.className = "status-badge"; tag.textContent = "Tersimpan • Menunggu penilaian"; }
+        if (banner) {
+            banner.className = "autograder-banner";
+            banner.style.display = "flex";
+            banner.textContent = "Jawaban tersimpan. Menunggu penilaian.";
+            if (submission.score != null) banner.textContent += ` Skor terbaik: ${Number(submission.score)} poin.`;
+        }
+        return;
+    }
+    const correct = latest.is_correct === 1 || latest.is_correct === true;
+    const bestScore = Number(submission.score ?? 0);
+    const latestScore = Number(latest.score ?? bestScore);
+    const retained = submission.score_retained || latestScore < bestScore || (!correct && Boolean(submission.is_correct));
+    if (tag) {
+        tag.className = `status-badge ${correct ? "badge-online" : "badge-warning"}`;
+        tag.textContent = `Tersimpan • ${correct ? "Benar" : "Salah"}`;
+    }
+    renderAutograderBanner(correct, latestScore, Number(question.score_weight ?? 0), "", retained, bestScore);
+}
+
 function renderAutograderBanner(isCorrect, score, maxScore, feedback, scoreRetained = false, retainedScore = 0) {
     const banner = document.getElementById("autograder-banner");
     if (!banner) return;
-
-    if (scoreRetained) {
-        banner.className = "autograder-banner banner-correct";
-        banner.style.display = "flex";
-
-        banner.innerHTML = `
-            <div class="grader-top-row">
-                <div class="grader-verdict correct">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                    <span>OUTPUT BELUM SESUAI (SKOR TERBAIK DIPERTAHANKAN)</span>
-                </div>
-                <div class="grader-score-badge correct">
-                    Skor +${retainedScore} Poin Tersimpan
-                </div>
-            </div>
-            <div class="grader-feedback-msg" style="color: #cbd5e1;">
-                ${escapeHtml(feedback || "Kueri terbaru Anda belum menghasilkan output yang sesuai acuan.")}
-            </div>
-            <div class="grader-retry-hint" style="color: #10b981;">
-                ℹ️ <strong>Proteksi Nilai Aktif:</strong> Kueri terbaru Anda belum tepat, namun karena Anda sudah pernah menyelesaikan soal ini dengan benar sebelumnya, skor tertinggi Anda (<strong>+${retainedScore} Poin</strong>) tetap aman tercatat dalam sistem ujian.
-            </div>
-        `;
-        return;
-    }
-
     banner.className = `autograder-banner ${isCorrect ? "banner-correct" : "banner-wrong"}`;
     banner.style.display = "flex";
-
-    const titleText = isCorrect ? "JAWABAN BENAR!" : "OUTPUT BELUM SESUAI";
-    const titleClass = isCorrect ? "correct" : "wrong";
-    const scoreBadgeText = isCorrect ? "Tercatat di Sistem" : "Perlu Perbaikan";
-    const badgeClass = isCorrect ? "correct" : "wrong";
-    const iconSvg = isCorrect
-        ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
-        : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
-
-    const retryNotice = isCorrect
-        ? `<div class="grader-retry-hint" style="color: #10b981;">Nilai soal ini telah tercatat dalam sistem penilaian ujian.</div>`
-        : `<div class="grader-retry-hint">Perbaiki query Anda di editor lalu klik <strong>Submit Answer</strong> kembali untuk mencoba lagi.</div>`;
-
     banner.innerHTML = `
         <div class="grader-top-row">
-            <div class="grader-verdict ${titleClass}">
-                ${iconSvg}
-                <span>${titleText}</span>
+            <div class="grader-verdict ${isCorrect ? "correct" : "wrong"}">
+                <span>Jawaban tersimpan. Hasil: ${isCorrect ? "benar" : "salah"}.</span>
             </div>
-            <div class="grader-score-badge ${badgeClass}">
-                ${scoreBadgeText}
-            </div>
+            <div class="grader-score-badge">Skor terbaik: ${Math.max(Number(score), Number(retainedScore))} / ${Number(maxScore)}</div>
         </div>
-        <div class="grader-feedback-msg">
-            ${escapeHtml(feedback || (isCorrect ? "Kueri menghasilkan output yang sesuai." : "Hasil output kueri belum cocok."))}
-        </div>
-        ${retryNotice}
+        ${scoreRetained ? '<div class="grader-feedback-msg">Skor terbaik sebelumnya tetap dipertahankan.</div>' : ''}
     `;
 }
 
@@ -1353,16 +1368,16 @@ function renderResultTable(columns, rows, count, isTruncated, evalMode = null) {
 // 6. Answer Submission
 // ==============================================================================
 async function submitAnswer() {
-    if (!isNetworkOnline) {
-        showToast("Koneksi jaringan sedang terputus! Kueri Anda tetap aman di draf lokal. Menghubungkan ulang...", "danger");
-        return;
-    }
     const q = questionsData[currentQuestionIndex];
-    if (!q) return;
-
+    if (!q || !editor) return;
     const query = editor.getValue().trim();
     if (!query) {
-        showToast("Query jawaban tidak boleh kosong!", "warning");
+        showToast("Query jawaban tidak boleh kosong.", "warning");
+        return;
+    }
+    saveLocalDraft(studentNim, q.id, query);
+    if (!isNetworkOnline) {
+        showToast("Belum dapat mengirim ke server. Draf disimpan di perangkat; coba lagi setelah koneksi pulih.", "warning");
         return;
     }
 
@@ -1379,7 +1394,7 @@ async function submitAnswer() {
 
     try {
         const currentActiveDb = getActiveDatabase();
-        const res = await fetch("/api/student/submit", {
+        const res = await studentFetch("/api/student/submit", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1391,93 +1406,46 @@ async function submitAnswer() {
             })
         });
         const data = await res.json();
+        if (!handleExamAccessResponse(res, data)) return;
         if (data.status === "success") {
-            const isCorrect = data.is_correct === true;
-            const score = data.score || 0;
-            const maxScore = data.max_score || q.score_weight;
-            const scoreRetained = data.score_retained === true;
-
-            // Cache submission in map & sync local draft (Fase 1)
-            submissionsMap[q.id] = {
-                submitted_query: query,
-                is_correct: isCorrect ? 1 : 0,
-                score: score,
-                eval_status: data.eval_status,
-                feedback: data.feedback,
-                score_retained: scoreRetained
+            const latest = data.latest_attempt || {
+                submitted_query: query, graded: data.graded !== false,
+                is_correct: data.is_correct ? 1 : 0, score: data.new_score, feedback: data.feedback
             };
+            const submission = {
+                ...(data.best_submission || submissionsMap[q.id] || {}),
+                latest_attempt: latest, score_retained: data.score_retained === true
+            };
+            submissionsMap[q.id] = submission;
             saveLocalDraft(studentNim, q.id, query);
             updateAutosaveUI("saved");
-
-            // Update button visual in navigation grid
-            const buttons = document.querySelectorAll(".q-btn");
-            if (buttons[currentQuestionIndex]) {
-                const b = buttons[currentQuestionIndex];
-                b.classList.add("submitted");
-                if (isCorrect) {
-                    b.classList.add("submitted-correct");
-                    b.classList.remove("submitted-wrong");
-                } else {
-                    b.classList.add("submitted-wrong");
-                    b.classList.remove("submitted-correct");
-                }
+            const button = document.querySelectorAll(".q-btn")[currentQuestionIndex];
+            if (button) {
+                button.classList.add("submitted");
+                button.classList.toggle("submitted-correct", Boolean(submission.is_correct));
+                button.classList.toggle("submitted-wrong", submission.is_correct === 0);
             }
-
-            // Update status tag in sidebar
-            const subTag = document.getElementById("submission-status-tag");
-            if (subTag) {
-                if (isCorrect) {
-                    subTag.className = "status-badge badge-online";
-                    subTag.textContent = `🟢 Benar (+${score} Poin)`;
-                } else {
-                    subTag.className = "status-badge badge-danger";
-                    subTag.textContent = "🔴 Belum Sesuai (0 Poin)";
-                }
-            }
-
-            // Render auto-grader banner
-            renderAutograderBanner(isCorrect, score, maxScore, data.feedback, scoreRetained, score);
-
-            // Render table output if columns exist, or error box
-            const outputContainer = document.getElementById("output-content");
-            if (data.eval_status === "syntax_error" && data.error) {
-                outputContainer.innerHTML = `
-                    <div class="state-box-error" style="border-left: 4px solid #ef4444; margin: 0.85rem;">
-                        <strong style="color: #ef4444;">Error Sintaks SQL:</strong><br>
-                        ${escapeHtml(data.error)}
-                    </div>
-                `;
-                metaContainer.textContent = `Query Error Sintaks • Evaluasi Gagal`;
-            } else if (data.columns && data.columns.length > 0) {
-                renderResultTable(data.columns, data.rows, data.row_count, false, isCorrect ? "correct" : "wrong");
-                metaContainer.textContent = `${data.row_count} baris • ${data.execution_time_ms} ms • Status: ${isCorrect ? "BENAR" : "BELUM SESUAI"}`;
+            renderSubmissionState(q, submission);
+            const pending = data.graded === false;
+            const correct = latest.is_correct === 1 || latest.is_correct === true;
+            if (data.columns?.length) {
+                renderResultTable(data.columns, data.rows, data.row_count, data.is_truncated, correct ? "correct" : "wrong");
             } else {
-                outputContainer.innerHTML = `
-                    <div class="state-box state-box-empty" style="margin: 0.85rem;">
-                        <p>Kueri berhasil dieksekusi tetapi menghasilkan 0 baris kolom data.</p>
-                    </div>
-                `;
-                metaContainer.textContent = `0 baris • Status: ${isCorrect ? "BENAR" : "BELUM SESUAI"}`;
+                document.getElementById("output-content").textContent = pending
+                    ? "Jawaban tersimpan. Menunggu penilaian." : "Jawaban tersimpan.";
             }
-
-            // Toast feedback
-            if (scoreRetained) {
-                showToast(`⚠️ Kueri terbaru belum tepat. Skor terbaik Anda (+${score} Poin) tetap aman!`, "warning");
-            } else if (isCorrect) {
-                showToast(`🎉 Jawaban Soal No. ${q.question_number} BENAR! (+${score} Poin)`, "success");
-            } else {
-                showToast(`Jawaban Soal No. ${q.question_number} belum sesuai. Periksa feedback di bawah.`, "danger");
-            }
+            metaContainer.textContent = pending ? "Tersimpan • Menunggu penilaian"
+                : `Tersimpan • ${correct ? "Benar" : "Salah"}${data.is_truncated ? ` • ${data.rows.length} dari ${data.row_count} baris ditampilkan` : ""}`;
+            showToast(pending ? "Jawaban tersimpan. Menunggu penilaian."
+                : `Jawaban tersimpan. Hasil: ${correct ? "benar" : "salah"}.`, correct && !pending ? "success" : "info");
         } else {
-            showToast(data.message || "Gagal menyimpan jawaban.", "danger");
-            if (data.message && (data.message.includes("belum memilih paket") || data.message.includes("tidak sesuai dengan paket"))) {
-                loadQuestions();
-            }
+            showToast(data.detail || data.message || "Penyimpanan jawaban belum dikonfirmasi server.", "warning");
         }
-    } catch (err) {
-        showToast("Gagal mengirim jawaban ke server.", "danger");
+    } catch (error) {
+        metaContainer.textContent = "Status penyimpanan belum terkonfirmasi";
+        showToast("Status penyimpanan belum dapat dipastikan. Periksa riwayat setelah koneksi pulih; draf tetap tersimpan.", "warning");
     } finally {
-        submitBtn.disabled = false;
+        submitBtn.disabled = !isNetworkOnline || isUserLoggingOut();
         submitBtn.innerHTML = originalText;
     }
 }
@@ -1495,7 +1463,7 @@ function initDatabaseSelector() {
 
     // Fetch available databases dynamically from backend
     const nimParam = studentNim ? `?nim=${encodeURIComponent(studentNim)}` : "";
-    fetch(`/api/student/databases${nimParam}`)
+    studentFetch(`/api/student/databases${nimParam}`)
         .then(res => res.json())
         .then(data => {
             if (data && data.status === "success" && data.databases) {
@@ -1520,10 +1488,10 @@ function initDatabaseSelector() {
             console.warn("Menggunakan opsi database lokal:", err);
         });
 
-    dbSelect.addEventListener("change", (e) => {
+    dbSelect.onchange = (e) => {
         const chosenDb = e.target.value;
         setActiveDatabase(chosenDb, false /* manual switch */);
-    });
+    };
 }
 
 function updateSandboxOptionLabel(virtualDb) {
@@ -1611,6 +1579,20 @@ function openImageLightboxWithList(list, index = 0, title = "Gambar Acuan") {
     if (modal) modal.style.display = "flex";
 }
 
+function setLightboxOriginalSize(original) {
+    const viewport = document.querySelector(".image-lightbox-body");
+    const button = document.getElementById("btn-original-image-size");
+    if (viewport) {
+        viewport.classList.toggle("is-original", original);
+        viewport.scrollTop = 0;
+        viewport.scrollLeft = 0;
+    }
+    if (button) {
+        button.textContent = original ? "Sesuaikan layar" : "Ukuran asli";
+        button.setAttribute("aria-pressed", String(original));
+    }
+}
+
 function updateLightboxDisplay() {
     const img = document.getElementById("image-lightbox-img");
     const counter = document.getElementById("lightbox-counter");
@@ -1621,6 +1603,7 @@ function updateLightboxDisplay() {
 
     const url = currentLightboxList[currentLightboxIndex];
     if (img) img.src = url;
+    setLightboxOriginalSize(false);
 
     if (counter) {
         counter.textContent = currentLightboxList.length > 1
@@ -1654,6 +1637,10 @@ function closeImageLightbox() {
 }
 
 function initImageLightbox() {
+    document.getElementById("btn-original-image-size")?.addEventListener("click", () => {
+        const viewport = document.querySelector(".image-lightbox-body");
+        setLightboxOriginalSize(!viewport?.classList.contains("is-original"));
+    });
     const lightboxModal = document.getElementById("image-lightbox-modal");
     const closeBtn = document.getElementById("btn-close-lightbox");
     const overlay = document.getElementById("image-lightbox-overlay");

@@ -15,7 +15,7 @@ if (-not (Get-Command "python" -ErrorAction SilentlyContinue)) {
     if (Get-Command "py" -ErrorAction SilentlyContinue) {
         $sysPy = "py"
     } else {
-        Write-Error "Python tidak ditemukan! Pastikan Python 3.10+ sudah terpasang dan ada di PATH."
+        Write-Error "Python tidak ditemukan! Pastikan Python 3.11+ sudah terpasang dan ada di PATH."
         exit 1
     }
 }
@@ -82,4 +82,4 @@ try {
 }
 
 # 5. Menjalankan server FastAPI (tanpa --reload demi stabilitas penuh ujian)
-& $venvPy -m uvicorn main:app --host 0.0.0.0 --port 8000
+& $venvPy -m uvicorn main:app --no-proxy-headers --host 0.0.0.0 --port 8000

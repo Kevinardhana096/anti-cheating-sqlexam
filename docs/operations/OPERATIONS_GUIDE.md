@@ -1,227 +1,60 @@
-# Panduan Operasional Sistem Ujian SQL Offline
-**Dokumentasi Resmi Operasional & SOP Pengawas / Laboran**
+# SOP pengawas dan laboran
 
-Dokumen ini memuat standar operasional prosedur (SOP) pelaksanaan ujian praktikum basis data secara offline menggunakan jaringan lokal tanpa ketergantungan koneksi internet.
+Panduan aktif, diperiksa 8 November 2026. Setup: [manual instalasi](<../../INSTALLATION MANUAL.md>). Detail teknis: [indeks dokumentasi](../README.md).
 
----
+## Jaringan dan laptop server
 
-## 1. Arsitektur Jaringan Offline
-Sistem dirancang untuk berjalan pada jaringan lokal tertutup (Isolated Local Area Network / Wi-Fi Hotspot) guna mencegah kecurangan online (AI tools, browsing, search engines).
+Server memerlukan service PostgreSQL dan environment koneksi yang benar. Windows memakai `setup.bat` untuk setup dan `run.bat`/`run.ps1` untuk menjalankan. macOS/Linux memakai langkah setup Python di manual lalu `bash run.sh`. Runner memakai satu proses Uvicorn dan port 8000.
 
-```
-[ Laptop Dosen / Host ] (Server FastAPI + PostgreSQL + SQLite)
-        │
-        ├─── [ Router Wi-Fi / Hotspot Lab (Tanpa Akses Internet) ]
-        │         ├── Laptop Mahasiswa 1  (Browser -> http://<HOST_IP>:8000)
-        │         ├── Laptop Mahasiswa 2  (Browser -> http://<HOST_IP>:8000)
-        │         └── Laptop Mahasiswa N  (Browser -> http://<HOST_IP>:8000)
-```
+Peserta harus dapat mengakses IP laptop server. Client/AP isolation bergantung topologi: fitur ini dapat memblokir peserta ke host jika keduanya berada pada Wi-Fi yang sama. Uji konektivitas tiap segmen terlebih dahulu; jangan mengaktifkannya sebagai aturan universal. Bila ada segmentasi peserta, pastikan aturan jaringan tetap mengizinkan akses ke server ujian.
 
-### Konfigurasi Jaringan & Keamanan Offline:
-1. **Penggunaan HTTP Lokal & Pertimbangan SSL/TLS:**
-   - Sistem sengaja berjalan pada protokol HTTP murni (`http://<HOST_IP>:8000`) pada rentang IP subnet privat (`192.168.x.x` atau `10.x.x.x`).
-   - Pada jaringan offline tertutup tanpa koneksi WAN, Certificate Authority (CA) publik tidak dapat diakses untuk validasi sertifikat HTTPS, sehingga HTTP lokal menghilangkan *browser security warning* (Self-Signed SSL warnings) pada laptop peserta.
-   - Proteksi sesi dijamin secara ketat melalui atribut cookie `HttpOnly=True`, `SameSite=Lax`, rotasi token sesi pada setiap login/logout, dan validasi header Origin/Referer (Anti-CSRF).
+Izinkan inbound port 8000 hanya pada jaringan yang dimaksud. Biarkan PostgreSQL hanya di localhost atau dibatasi firewall; peserta tidak memerlukan akses langsung port 5432. HTTP tidak mengenkripsi trafik. Cookie/CSRF tidak menggantikan perlindungan jaringan atau TLS; pengaturan TLS mengikuti infrastruktur institusi. Jangan mematikan firewall sebagai prosedur rutin.
 
-2. **Isolasi Wi-Fi (AP Client Isolation):**
-   - **Wajib diaktifkan:** Pada menu pengaturan Router Wi-Fi / Access Point lab, aktifkan fitur **"AP Isolation"** (atau dikenal sebagai *Client Isolation / Guest Mode*).
-   - Fitur ini mencegah komunikasi *Peer-to-Peer* (P2P) antar laptop mahasiswa di jaringan Wi-Fi yang sama, sehingga mahasiswa tidak dapat melakukan *packet sniffing*, scanning port, atau mengirim file kunci jawaban secara langsung ke laptop peserta lain.
+Laptop host harus menyala, terhubung daya dan tidak tidur. Mematikan layar berbeda dari sleep. Uji pengaturan lid/power pada laptop yang dipakai sebelum pelaksanaan.
 
-3. **Konfigurasi Firewall Laptop Host:**
-   - **Port 8000 (Aplikasi Web):** Buka port TCP `8000` untuk *Inbound Traffic* agar laptop mahasiswa dapat mengakses portal ujian.
-     ```cmd
-     netsh advfirewall firewall add rule name="SQL Exam Server (Port 8000)" dir=in action=allow protocol=TCP localport=8000
-     ```
-   - **Port 5432 (PostgreSQL):** Pastikan port PostgreSQL `5432` **TIDAK** dibuka ke jaringan Wi-Fi publik. File `postgresql.conf` sebaiknya hanya mendengarkan `listen_addresses = 'localhost'` atau diblokir dari antarmuka Wi-Fi oleh firewall, sehingga mahasiswa tidak bisa menghubungkan DBeaver / pgAdmin langsung ke server basis data.
+## Sebelum kelas
 
-4. **Deteksi IP Host:**
-   - Jalankan `ipconfig` (Windows) atau `ifconfig / ip a` (Linux/macOS) pada laptop host untuk memeriksa IP lokal (misal: `192.168.1.50`).
-   - Bagikan URL ujian `http://<HOST_IP>:8000` ke papan tulis atau pengumuman proyektor lab.
+1. Hentikan/arsipkan kelas sebelumnya sebelum upgrade. Selesaikan review nilai, unduh hasil/log dan buat backup lengkap sebelum Bersihkan Sesi.
+2. Jika memulai kelas baru, Bersihkan Sesi menghapus peserta, jawaban dan riwayat terkait serta kembali ke persiapan. Tombol ini bukan sekadar membersihkan daftar online. Workspace PostgreSQL tidak seluruhnya dibersihkan oleh tindakan ini.
+3. Periksa `/health`, `/ready` dan panel Database. Reset Database hanya jika memang perlu mengganti dataset; bukan cara tes koneksi dan bukan restore nilai.
+4. Atur paket aktif dan soal saat persiapan. Nomor harus unik dalam paket. Tinjau kunci, prasyarat DDL/DML, alias yang diwajibkan, toleransi, urutan seri dan batas LIMIT.
+5. Soal/paket dibekukan selama ujian aktif. Dua admin dapat bekerja bersamaan; konflik revisi berarti form perlu dimuat ulang, bukan dipaksa menimpa.
+6. Uji soal dengan [IDE admin](ADMIN_IDE.md), lalu gunakan perangkat mahasiswa untuk gladi bersih lobby, fullscreen, jaringan dan pergantian sesi.
+7. Siapkan rencana backup/pemulihan dan ukur kapasitas pada host/jaringan kelas. Angka simulasi 24 peserta bukan jaminan kapasitas kelas nyata.
 
----
+## Mulai dan pantau
 
-## 2. Prosedur Pra-Ujian (Checklist Laboran & Dosen)
+Peserta login dengan NIM dan nama lalu menunggu di lobby. Setelah siap, tekan **Mulai Ujian**. Acuan paket aktif divalidasi; kegagalan tidak membuka akses. Login peserta terlambat saat aktif langsung menuju ujian. Setelah masuk fullscreen, peserta memilih paket sesuai arahan pengawas.
 
-Sebelum peserta memasuki ruangan ujian:
+Monitoring peserta diperbarui sekitar 10 detik; daftar waiting room pada dashboard sekitar 20 detik. Angka IP sama dapat sah karena NAT bersama (`ALLOW_SHARED_IP=true`). Kepemilikan NIM/perangkat berbeda dari status online. Log fokus/tab berasal dari browser dan perlu interpretasi pengawas; jangan menyimpulkan kecurangan dari satu angka saja.
 
-1. **Inisialisasi Virtual Environment & Dependensi:**
-   - Jalankan `run.bat` (Windows Command Prompt), `run.ps1` (PowerShell), atau `run.sh` (Linux/macOS).
-   - Script akan otomatis mendeteksi atau membuat virtual environment `.venv` dan menginstal pustaka yang dibutuhkan dari `requirements.txt`.
-2. **Verifikasi Database Master:**
-   - Buka browser host dan akses portal pengawas: `http://localhost:8000/admin`.
-   - Masukkan *Master Key* pengawas.
-   - Buka tab **Database**, pilih `pagila`, dan klik **Reset Database** untuk memastikan tabel dan data awal kembali ke kondisi bersih.
-   - Ulangi untuk database `classicmodels`.
-3. **Verifikasi Paket & Bank Soal:**
-   - Buka tab **Soal** di portal pengawas.
-   - Pastikan paket ujian (misal: Paket A, B, C, D) sudah terdaftar dan berisi nomor soal dengan bobot poin yang tepat.
-4. **Pembersihan Sesi Ujian Sebelumnya:**
-   - Buka tab **Monitor** dan klik tombol **Bersihkan Sesi**.
-   - Ini akan mengosongkan riwayat login mahasiswa sebelumnya sehingga sistem siap menerima peserta baru.
-5. **Kondisi Awal Ujian:**
-   - Pastikan status ujian berada pada posisi **Menunggu** (Badge kuning). Dalam kondisi ini, mahasiswa yang login akan diarahkan ke *Waiting Room* dan lembar soal belum dapat diakses.
+Perhatikan status tersimpan, hasil terbaru, skor terbaik dan pending. Pending/review bukan nol. Gangguan respons tidak membuktikan jawaban belum tersimpan; ulang submit dapat menambah riwayat percobaan.
 
----
+| Tindakan | Efek |
+|---|---|
+| Hentikan Ujian | Tutup akses soal/query/submit, pertahankan jawaban dan token |
+| Hentikan Semua | Cabut sesi peserta; berbeda dari stop normal |
+| Bebaskan Sesi | Cabut token dan lepas ikatan perangkat tanpa menghapus nilai |
+| Reset Paket | Izinkan pemilihan ulang, ubah konteks penilaian dan batalkan pekerjaan konteks lama |
+| Bersihkan Sesi | Hapus data kelas sebelumnya dan kembali ke persiapan |
+| Bersihkan Log | Hapus log ujian, bukan audit permintaan admin |
 
-## 3. Pelaksanaan Ujian (Saat Ujian Berlangsung)
+Detail transisi: [EXAM_CONTROL.md](EXAM_CONTROL.md). Admin memakai master key sama dengan sesi independen; perubahan password mencabut admin lain. Lihat [ADMIN_SECURITY.md](ADMIN_SECURITY.md).
 
-### A. Alur Masuk Mahasiswa:
-1. Mahasiswa membuka browser (Google Chrome / Microsoft Edge) dan mengakses:
-   `http://<HOST_IP>:8000`
-2. Mahasiswa memasukkan **NIM** dan **Nama Lengkap**, lalu memilih Paket Soal di ruang tunggu.
-3. Mahasiswa menunggu di Waiting Room hingga pengawas membuka ujian.
+## Akhiri, review dan arsipkan
 
-### B. Membuka Akses Ujian:
-1. Pada portal pengawas (`/admin`), amati daftar mahasiswa yang terhubung di kartu **Kontrol Ujian** (`admin-waiting-count`).
-2. Setelah seluruh peserta hadir dan siap di ruang tunggu, klik tombol **Mulai Ujian** (berwarna hijau).
-3. Status berubah menjadi **Aktif**. Seluruh laptop mahasiswa akan secara otomatis dialihkan ke lembar pengerjaan soal (`/exam`) tanpa perlu me-refresh browser.
+Tekan **Hentikan Ujian**. Submit baru ditolak, tetapi antrean sah yang sudah diterima dapat menyelesaikan penilaian setelah stop. Menekan Mulai lagi membuka kembali ujian yang sama; bukan membuat kelas baru.
 
-### C. Pemantauan Real-Time (Tab Monitor):
-1. Pengawas memantau tabel **Aktivitas Mahasiswa** yang diperbarui secara otomatis tiap 6 detik:
-   - **NIM & Nama:** Identitas peserta.
-   - **IP Address:** Memastikan tidak ada 2 mahasiswa menggunakan IP yang sama / login ganda.
-   - **Submisi:** Jumlah nomor soal yang telah dikerjakan dan disimpan.
-   - **Skor:** Perolehan nilai sementara hasil evaluasi autograder.
-   - **Peringatan:** Menampilkan frekuensi berpindah tab / jendela ujian.
-2. **Penanganan Pelanggaran:**
-   - Jika peserta berpindah tab, counter peringatan akan bertambah dan dicatat di audit log.
-   - Pengawas dapat melakukan **Reset Sesi** pada baris mahasiswa terkait jika diperlukan tindakan disipliner atau login ulang.
+Selesaikan pending/review lewat [API/CLI penilaian](GRADING_QUEUE.md). Form keputusan khusus di dashboard belum tersedia. Perbaikan kode tidak otomatis menilai ulang percobaan lama; minta regrade eksplisit sesuai revisi/keputusan terbaru.
 
----
+Ekspor CSV/ZIP/log untuk arsip. ZIP SQL dan CSV bukan backup layanan lengkap. Hentikan server/writer lain dan buat bundle SQLite, PostgreSQL dan unggahan sesuai [RELEASE_READINESS.md](RELEASE_READINESS.md). Jangan mengganti SQLite secara manual dan menghapus WAL/SHM sebagai prosedur pemulihan rutin; pertahankan bukti insiden dan gunakan restore tervalidasi ke tujuan baru.
 
-## 4. Prosedur Pasca-Ujian (Selesai Ujian & Export)
+## Kredensial dan konfigurasi
 
-1. **Menutup Ujian:**
-   - Ketika waktu ujian habis, pengawas menekan tombol **Hentikan Ujian** (berwarna merah) di tab Monitor.
-   - Lembar soal peserta otomatis terkunci dan diarahkan kembali ke ruang tunggu.
-2. **Mengunduh Berkas Hasil Ujian:**
-   - Buka tab **Export** di portal pengawas:
-     - Klik **Unduh CSV**: Rekapitulasi tabel nilai dan jawaban seluruh mahasiswa dalam format Excel/CSV.
-     - Klik **Unduh ZIP**: Berkas arsip `.zip` yang berisi satu file SQL jawaban rapi per mahasiswa (contoh: `H071231052_Yusra_Erlangga.sql`) untuk penilaian lanjutan offline.
-     - Klik **Unduh Log (CSV)**: Arsip kronologis aktivitas sistem untuk audit.
-     - Klik **Unduh Pelanggaran (CSV)**: Rekap frekuensi perpindahan tab mahasiswa.
-3. **Penyimpanan Aman:**
-   - Simpan berkas CSV dan ZIP ke flashdisk atau penyimpanan pengawas.
-4. **Shutdown Server:**
-   - Tekan `Ctrl + C` pada jendela konsol runner host untuk menghentikan server secara bersih.
+Aplikasi tidak membaca `.env` otomatis. Atur environment pada terminal yang menjalankan server. Rotasi `PG_STUDENT_PASS` dilakukan pada environment sebelum restart; startup mengonfigurasi role dengan kredensial tersebut. Untuk master key yang sudah ada, gunakan dashboard atau pemulihan lokal, bukan environment bootstrap. Jangan menyimpan password pada script yang dibagikan.
 
----
+## Insiden dan kapasitas
 
-## 5. Prosedur Darurat & Troubleshooting
+Jika akses gagal, periksa service, log, `/ready`, IP/port, firewall dan jalur router. Reset Database mengganti dataset dan bukan perbaikan pool/koneksi. Saat mati listrik, simpan file DB/WAL/SHM yang tersisa dan lakukan diagnosis pada salinan. WAL/NORMAL tidak menjamin nol kehilangan transaksi.
 
-| Gejala | Penyebab Umum | Solusi Cepat |
-|---|---|---|
-| Mahasiswa tidak bisa membuka `http://<HOST_IP>:8000` | Firewall Windows memblokir port 8000 atau IP host berubah. | Buka *Windows Defender Firewall with Advanced Security* -> *Inbound Rules* -> Tambahkan Rule port TCP 8000 (Allow Connection). Periksa ulang IP host dengan `ipconfig`. |
-| Server host mendadak mati / laptop restart | Mati listrik / kehabisan baterai. | Nyalakan kembali laptop host dan jalankan `run.bat` / `run.ps1`. Karena database SQLite menggunakan mode WAL (`exam_system.db`), seluruh sesi, jawaban tersimpan, dan skor mahasiswa tetap aman dan tidak hilang. Mahasiswa cukup login kembali. |
-| Mahasiswa salah memilih paket soal | Terlanjur memilih Paket A padahal jadwalnya Paket B. | Pada tab Monitor pengawas, klik tombol **Reset Paket** pada baris nama mahasiswa terkait. Mahasiswa kemudian dapat memilih ulang paket soal. |
-| Database PostgreSQL error saat query | Koneksi pool terputus. | Buka tab Database pengawas dan klik tombol **Reset Database** untuk membersihkan dan memulihkan state koneksi. |
-
----
-
-## 6. Kapasitas Beban & Batas Aman Mahasiswa (P1-5)
-
-Berdasarkan pengujian beban konkuren (`scripts/run_regression_tests.py` dan `scratch/test_concurrent_load.py`):
-- **Hasil Pengujian Beban:**
-  - 35 worker konkuren secara simultan mengeksekusi 70 query kompleks (multitable JOIN dan agregasi) pada database `pagila`.
-  - Seluruh 70 query berhasil 100% tanpa ada query yang gagal atau mengalami error koneksi.
-  - Throughput rata-rata sistem: **13.7 query/detik**.
-  - Waktu tunggu rata-rata antrian connection pool: **~1.19 detik**.
-  - Kehabisan pool (*exhausted count*): **0**.
-- **Karakteristik Perilaku Ujian Mahasiswa:**
-  - Selama pengerjaan ujian praktikum, mahasiswa menghabiskan 80–90% waktunya untuk membaca instruksi soal dan menyusun sintaksis query di editor SQL.
-  - Eksekusi query terjadi secara berkala (*intermittent burst*), rata-rata 1 kali eksekusi setiap 15–30 detik per mahasiswa.
-- **Rekomendasi Batas Aman:**
-  - **Kapasitas Aman Teruji:** **50 hingga 80 mahasiswa aktif secara bersamaan** pada satu laptop/server host standar (spesifikasi 4 Core CPU, 8GB RAM).
-  - Untuk lab berkapasitas > 80 mahasiswa dalam satu ruangan, atur variabel lingkungan `PG_POOL_MAXCONN=60` atau `70` di `.env` dan pastikan konfigurasi `max_connections = 150` pada `postgresql.conf`.
-
----
-
-## 7. Prosedur Rotasi Credential Pra-Ujian (P2-5)
-
-Untuk menjaga integritas dan kerahasiaan sebelum ujian dimulai:
-
-1. **Rotasi Master Key Pengawas:**
-   - **Metode A (Melalui Dashboard Web):**
-     1. Login ke `/admin/login`.
-     2. Klik tombol **Ganti Password** di header dashboard admin.
-     3. Masukkan password lama dan tentukan password baru yang kuat.
-     4. Sistem akan otomatis memperbarui hash password di SQLite `exam_config`, membatalkan sesi lama, dan menerbitkan token sesi baru.
-   - **Metode B (Melalui Environment Variable):**
-     1. Buat atau edit file `.env` di direktori proyek:
-        ```ini
-        MASTER_KEY=UjianBasisData2026!Rahasia
-        ```
-     2. Jalankan server; sistem akan menggunakan master key dari environment variable.
-
-2. **Rotasi Password Mahasiswa PostgreSQL (`student_role`):**
-   - Secara default, role mahasiswa menggunakan password yang diatur pada setup awal.
-   - Untuk merotasi sebelum hari-H ujian:
-     1. Jalankan `psql -U postgres`:
-        ```sql
-        ALTER ROLE student_role WITH PASSWORD 'SandiBaruPraktikum2026';
-        ```
-     2. Tambahkan atau perbarui entri di file `.env`:
-        ```ini
-        PG_STUDENT_PASS=SandiBaruPraktikum2026
-        ```
-     3. Restart server aplikasi.
-
----
-
-## 8. Prosedur Backup & Restore SQLite & PostgreSQL (P2-4)
-
-### A. Backup Database SQLite (`exam_system.db`):
-Karena SQLite berjalan dalam mode WAL (`journal_mode=WAL`), backup aman dilakukan bahkan saat ujian sedang berlangsung:
-
-1. **Backup Online (Tanpa Mematikan Server):**
-   - Melalui utilitas SQLite:
-     ```cmd
-     sqlite3 exam_system.db ".backup 'backup_exam_system_%DATE%.db'"
-     ```
-   - Melalui Python script:
-     ```bash
-     python -c "import sqlite3; s = sqlite3.connect('exam_system.db'); b = sqlite3.connect('backup_exam.db'); s.backup(b); b.close(); s.close(); print('Backup SQLite Sukses!')"
-     ```
-2. **Restore SQLite:**
-   - Matikan server (`Ctrl + C`).
-   - Salin file backup menggantikan `exam_system.db`.
-   - Hapus file temporary `-wal` dan `-shm` jika ada:
-     ```cmd
-     del exam_system.db-wal exam_system.db-shm
-     ```
-   - Jalankan kembali server.
-
-### B. Backup & Restore Database Master PostgreSQL:
-1. **Backup Master `pagila` dan `classicmodels`:**
-   ```cmd
-   pg_dump -U postgres -d pagila -F c -b -v -f "backup_pagila.dump"
-   pg_dump -U postgres -d classicmodels -F c -b -v -f "backup_classicmodels.dump"
-   ```
-2. **Restore Database:**
-   ```cmd
-   pg_restore -U postgres -d pagila --clean --if-exists -v "backup_pagila.dump"
-   pg_restore -U postgres -d classicmodels --clean --if-exists -v "backup_classicmodels.dump"
-   ```
-   *Catatan:* Anda juga dapat menggunakan tombol **Reset Database** di tab Database Admin untuk memulihkan tabel dari SQL baseline bawaan (`data/pagila-0.10.1/` dan `data/classicmodels.sql`).
-
----
-
-## 9. Batasan Deployment Multi-Worker & Evaluasi Shared Store (P1-6, P1-7, P2-6)
-
-Sistem dirancang secara presisi sebagai aplikasi proses tunggal (*single-process ASGI*) yang sangat efisien untuk komputer/laptop host laboratorium offline.
-
-### Mengapa Single-Worker Direkomendasikan untuk Lab Offline:
-1. **SQLite WAL Single-Writer:** SQLite mode WAL mengizinkan pembacaan konkuren tanpa batas (*unlimited concurrent readers*), namun penulisan dilakukan secara berurutan (*single writer lock*). Dalam proses tunggal dengan `busy_timeout=5000ms`, tidak pernah terjadi lock contention.
-2. **In-Memory Rate Limiting & Sesi:** Modul proteksi brute-force `InMemoryRateLimiter` dan pelacak connection pool PostgreSQL beroperasi dalam memori proses lokal (*thread-safe in-memory state*).
-3. **Kapasitas Sudah Memadai:** Satu worker Uvicorn berbasis asynchronous event loop mampu melayani hingga 80 mahasiswa secara stabil, yang umumnya sudah mencakup 1-2 ruangan lab praktikum.
-
-### Batasan dan Panduan Jika Menggunakan Multi-Worker (`--workers N`):
-Jika dijalankan dengan `uvicorn --workers 4`:
-- Masing-masing proses worker akan memiliki instansiasi memori terpisah, sehingga bucket counter *rate limiter* tidak dibagikan antar worker.
-- Terjadi potensi *database locked* pada SQLite jika beberapa proses worker mencoba menulis tabel `submissions` atau `exam_logs` pada milidetik yang persis sama.
-
-### Roadmap Migrasi Multi-Server / Kampus Berskala Besar (P1-6 & P1-7):
-Untuk deployment skala besar (> 200 mahasiswa secara serentak melintasi beberapa gedung laboratorium):
-1. **Migrasi Tabel State ke PostgreSQL:** Pindahkan tabel `users`, `exam_logs`, `submissions`, dan `exam_config` dari SQLite ke PostgreSQL database khusus (misal: `exam_backend`).
-2. **Shared Store Redis:** Gunakan Redis untuk sentralisasi token sesi, heartbeat, dan distributed sliding-window rate limiting.
-3. Dokumen evaluasi arsitektur lengkap dapat dilihat pada [docs/design/ARCHITECTURE_EVALUATION.md](file:///c:/project/anti-cheating-sqlexam/docs/design/ARCHITECTURE_EVALUATION.md).
+SQLite tetap memiliki satu writer; satu proses aplikasi pun dapat mengalami contention. Rate limiter, pool dan sebagian cache bersifat per proses. Menambah `--workers` melipatgandakan resource dan tidak otomatis meningkatkan kapasitas dengan aman. Sistem belum menyediakan shared rate limiter atau deployment multi-node. Gunakan [panduan pengukuran dan restore](RELEASE_READINESS.md); jangan memakai klaim angka peserta tanpa benchmark dan gladi bersih.

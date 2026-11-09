@@ -40,3 +40,7 @@ data/pagila-*/
 # Dynamic admin question uploads
 static/uploads/questions/output_*.png
 static/uploads/questions/qimg_*.png
+
+# Operational secrets and local browser artifacts
+backups/
+.playwright-mcp/

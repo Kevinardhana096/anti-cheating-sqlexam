@@ -1,0 +1,46 @@
+[
+  {
+    "case": "apostrophe breaks action",
+    "error": "SyntaxError",
+    "injected": false
+  },
+  {
+    "case": "student name injects admin handler",
+    "error": null,
+    "injected": true
+  },
+  {
+    "case": "403 becomes empty student list",
+    "displayedCount": 0,
+    "emptyMessage": true
+  },
+  {
+    "case": "deleteAllQuestions HTTP 403",
+    "toasts": [
+      [
+        "Seluruh soal berhasil dihapus.",
+        "success"
+      ]
+    ]
+  },
+  {
+    "case": "confirmClearLogs HTTP 403",
+    "toasts": [
+      [
+        "Log berhasil dibersihkan."
+      ]
+    ]
+  },
+  {
+    "case": "executeClearSessions HTTP 403",
+    "toasts": [
+      [
+        "Sesi sebelumnya berhasil dibersihkan."
+      ]
+    ]
+  },
+  {
+    "case": "older poll overwrites newer response",
+    "staleVisible": true
+  }
+]
