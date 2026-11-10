@@ -23,6 +23,23 @@ from types import SimpleNamespace
 class AdminFixTests(unittest.TestCase):
     setUp=access.ExamAccessTests.setUp
 
+    def test_question_validation_reports_sql_field_and_preserves_data(self):
+        db.set_exam_state('waiting')
+        payload={'question_number':999,'category':'A','title':'Validation test','description':'Validation fixture',
+            'score_weight':10,'expected_query':'ini hanya kalimat acak','target_database':'pagila'}
+        with closing(db.get_sqlite_conn()) as conn:
+            before=conn.execute('SELECT COUNT(*) FROM questions').fetchone()[0]
+        r=self.client.post('/api/admin/questions',json=payload)
+        self.assertEqual(r.status_code,400,r.text)
+        self.assertIn('Kunci jawaban',r.json()['detail'])
+        with closing(db.get_sqlite_conn()) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM questions').fetchone()[0],before)
+        r=self.client.post('/api/admin/questions',json={**payload,'expected_query':'SELECT 1','setup_query':'ini bukan SQL'})
+        self.assertEqual(r.status_code,400,r.text)
+        self.assertIn('setup',r.json()['detail'])
+        r=self.client.post('/api/admin/questions',json={**payload,'expected_query':'SELECT 1'})
+        self.assertEqual(r.status_code,200,r.text)
+
     def png(self):
         output=BytesIO()
         Image.new('RGB',(2,2)).save(output,format='PNG')

@@ -1046,15 +1046,22 @@ def api_admin_save_question(req: SaveQuestionRequest, request: Request):
         raise HTTPException(status_code=409, detail="Akhiri ujian sebelum mengubah soal atau kebijakan penilaian.")
     try:
         from grading_results import policy_from
-        from grading_engine import reference_statements
         current = database.get_question_by_id(req.question_id) if req.question_id else {}
         policy = policy_from(req.grading_policy if req.grading_policy is not None else (current or {}).get("grading_policy"))
-        if policy.mode == "automatic":
-            reference_statements(req.expected_query or "", (req.target_database or database.DEFAULT_EXAM_DB)=="sandbox_pribadi")
-        if req.setup_query:
-            reference_statements(req.setup_query, True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Query acuan, setup, atau kebijakan penilaian tidak valid.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Kebijakan penilaian tidak valid. Periksa format dan nilai grading_policy.") from error
+    from grading_engine import reference_statements
+    from sql_policy import SQLPolicyError, ParseError
+    def validate_sql(text,sandbox,label):
+        try:
+            reference_statements(text,sandbox)
+        except (ValueError,SQLPolicyError,ParseError) as error:
+            reason=str(error).replace('\n',' ')[:300]
+            raise HTTPException(status_code=400,detail=f"{label} bukan SQL yang valid atau diizinkan: {reason}") from error
+    if policy.mode == 'automatic':
+        validate_sql(req.expected_query or '',(req.target_database or database.DEFAULT_EXAM_DB)=='sandbox_pribadi','Kunci jawaban')
+    if req.setup_query:
+        validate_sql(req.setup_query,True,'Query prasyarat (setup)')
 
     exp_imgs = req.expected_output_images if req.expected_output_images is not None else req.expected_output_image
     q_imgs = req.question_images if req.question_images is not None else ""

@@ -22,7 +22,10 @@ window.fetch = async function(input, options = {}) {
             showToast('Akses admin ditolak. Muat ulang atau login kembali.','warning');
             if (String(data.detail).toLowerCase().startsWith('akses ditolak') && typeof window.location.assign==='function') window.location.assign('/admin/login');
         }
-        throw new Error(typeof data.detail==='string' ? data.detail : 'Permintaan admin gagal.');
+        const message=typeof data.detail==='string' ? data.detail : 'Permintaan admin gagal.';
+        const error=new Error(message);
+        error.status=response.status;
+        throw error;
     }
     return response;
 };
@@ -1765,7 +1768,7 @@ async function saveQuestionForm(e) {
 
     } catch (err) {
 
-        showToast("Error koneksi server saat menyimpan soal.", "danger");
+        showToast(err.message || "Soal belum dapat disimpan. Coba kembali.", err.status && err.status < 500 ? "warning" : "danger");
 
     }
 
