@@ -31,6 +31,11 @@ atau kedaluwarsa. Mengganti alamat IP tidak langsung membatalkan sesi admin.
 
 ## Konflik tindakan
 
+Saat menyimpan soal, HTTP 400 dapat berarti kunci SQL, query setup atau kebijakan
+penilaian ditolak. Ini bukan gangguan koneksi. Dashboard menampilkan alasan validasi
+dan mempertahankan isi form. Kalimat bebas diletakkan pada judul/deskripsi; kolom
+kunci jawaban otomatis memerlukan SQL valid, misalnya `SELECT 1 AS uji` pada pagila.
+
 Kondisi ujian bersifat bersama: jika admin A mengakhiri ujian, admin B melihat status
 yang sama melalui polling berikutnya. Perintah mulai yang sedang memvalidasi acuan
 ditolak jika status/revisi ujian berubah selama validasi.
