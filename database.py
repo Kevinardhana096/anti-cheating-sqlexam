@@ -1,4 +1,5 @@
 import os
+from contextvars import ContextVar
 import uuid
 import sqlite3
 import datetime
@@ -11,11 +12,15 @@ import zipfile
 import io
 import csv
 import threading
+from contextlib import closing, nullcontext
+import hashlib
 from typing import Optional, Dict, Any, List, Tuple, Set
 
 import psycopg2
 
 from psycopg2 import sql, extras, pool
+import sandbox_roles
+from sql_policy import prepare_sql, split_statements, SQLPolicyError, ParseError
 
 
 
@@ -148,8 +153,12 @@ def get_allowed_databases() -> List[Dict[str, Any]]:
 
 
 
+SQLITE_REQUEST_PATH = ContextVar("sqlite_request_path", default=None)
+SQLITE_COMMIT_GUARD = ContextVar("sqlite_commit_guard", default=nullcontext)
+
+
 def get_sqlite_conn() -> sqlite3.Connection:
-    db_path = os.environ.get("EXAM_SQLITE_PATH", SQLITE_DB_PATH)
+    db_path = SQLITE_REQUEST_PATH.get() or os.environ.get("EXAM_SQLITE_PATH", SQLITE_DB_PATH)
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -160,9 +169,120 @@ def get_sqlite_conn() -> sqlite3.Connection:
 
 
 
-def init_system_db():
+SQLITE_SCHEMA_VERSION = 5
 
+
+def _add_missing_columns(conn: sqlite3.Connection, columns) -> None:
+    for table, definition in columns:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table});")}
+        if definition.split()[0] not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition};")
+
+
+def migrate_system_db(conn: sqlite3.Connection) -> None:
+    """Upgrade legacy databases atomically; never infer correctness from ALTER errors."""
+    conn.execute("BEGIN IMMEDIATE;")
+    try:
+        version = conn.execute("PRAGMA user_version;").fetchone()[0]
+        if version > SQLITE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"SQLite schema version {version} is newer than supported version "
+                f"{SQLITE_SCHEMA_VERSION}. Use a compatible application version."
+            )
+        migrations = (
+            (1, (
+                ("users", "virtual_db TEXT DEFAULT NULL"),
+                ("users", "selected_category TEXT DEFAULT NULL"),
+                ("users", "device_id TEXT DEFAULT NULL"),
+                ("questions", "target_database TEXT DEFAULT 'pagila'"),
+                ("questions", "difficulty_level TEXT DEFAULT 'Medium'"),
+                ("questions", "expected_output_image TEXT DEFAULT ''"),
+                ("questions", "question_images TEXT DEFAULT ''"),
+                ("exam_packages", "description TEXT DEFAULT ''"),
+                ("exam_packages", "is_active INTEGER DEFAULT 1"),
+            )),
+            (2, (
+                ("submissions", "is_correct INTEGER DEFAULT 0"),
+                ("submissions", "score INTEGER DEFAULT 0"),
+                ("submissions", "eval_status TEXT DEFAULT 'pending'"),
+                ("submissions", "feedback TEXT DEFAULT ''"),
+            )),
+            (3, (
+                ("questions", "grading_policy TEXT NOT NULL DEFAULT '{}'"),
+                ("questions", "setup_query TEXT NOT NULL DEFAULT ''"),
+                ("questions", "question_revision INTEGER NOT NULL DEFAULT 1"),
+                ("questions", "reference_validation TEXT NOT NULL DEFAULT 'unvalidated'"),
+                ("submissions", "question_revision INTEGER NOT NULL DEFAULT 1"),
+            )),
+        )
+        migrations += ((4, (("questions", "edit_revision INTEGER NOT NULL DEFAULT 1"),)),)
+        migrations += ((5, (("users", "grading_revision INTEGER NOT NULL DEFAULT 0"),)),)
+        for target_version, columns in migrations:
+            if version < target_version:
+                _add_missing_columns(conn, columns)
+                if target_version == 3:
+                    conn.execute("""CREATE TABLE submission_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+                        submitted_query TEXT NOT NULL, submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        graded INTEGER NOT NULL, is_correct INTEGER, score INTEGER,
+                        eval_status TEXT NOT NULL, feedback TEXT NOT NULL DEFAULT '',
+                        question_revision INTEGER NOT NULL, source TEXT NOT NULL DEFAULT 'submission')""")
+                    conn.execute("CREATE INDEX idx_attempts_student_question ON submission_attempts(user_id,question_id,id)")
+                    conn.execute("""INSERT INTO submission_attempts
+                        (user_id,question_id,submitted_query,submitted_at,graded,is_correct,score,eval_status,feedback,question_revision,source)
+                        SELECT user_id,question_id,submitted_query,submitted_at,
+                            CASE WHEN eval_status IN ('pending','manual_review','reference_error','evaluation_error','evaluation_limit') THEN 0 ELSE 1 END,
+                            is_correct,score,COALESCE(eval_status,'pending'),COALESCE(feedback,''),1,'legacy_best'
+                        FROM submissions""")
+                if target_version == 4:
+                    conn.execute("""CREATE TABLE admin_sessions (
+                        id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL,
+                        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                        last_seen INTEGER NOT NULL, login_ip TEXT NOT NULL)""")
+                    conn.execute("""CREATE TABLE admin_audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                        method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL,
+                        ip_address TEXT NOT NULL, timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+                    conn.execute("CREATE INDEX idx_admin_audit_session ON admin_audit(session_id,id)")
+                if target_version == 5:
+                    import grading_queue
+                    grading_queue.migrate(conn)
+                conn.execute(f"PRAGMA user_version = {target_version};")
+        for _, columns in migrations:
+            for table, definition in columns:
+                names = {row["name"] for row in conn.execute(f"PRAGMA table_info({table});")}
+                if definition.split()[0] not in names:
+                    raise RuntimeError(f"SQLite schema is inconsistent: {table}.{definition.split()[0]} is missing")
+        for table, required in (("admin_sessions", {"id","token_hash","created_at","expires_at","last_seen","login_ip"}), ("admin_audit", {"id","session_id","method","path","status_code","ip_address","timestamp"})):
+            if not required.issubset({r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}):
+                raise RuntimeError(f"SQLite schema is inconsistent: {table}")
+        for table,required in (("grading_jobs", {"id","attempt_id","question_revision","exam_revision","dataset_revision","active_database","status","tries","lease_token","lease_until","decision_base","version"}),
+                               ("grading_decisions", {"id","attempt_id","question_revision","graded","score","is_correct","eval_status","feedback","source","run_token"})):
+            if not required.issubset({r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}):
+                raise RuntimeError(f"SQLite schema is inconsistent: {table}")
+        attempts_columns = {row["name"] for row in conn.execute("PRAGMA table_info(submission_attempts)")}
+        if not {"id", "user_id", "question_id", "submitted_query", "submitted_at", "graded", "is_correct", "score", "eval_status", "feedback", "question_revision", "source"}.issubset(attempts_columns):
+            raise RuntimeError("SQLite schema is inconsistent: submission_attempts is missing or incomplete")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def init_system_db():
     conn = get_sqlite_conn()
+    try:
+        version = conn.execute("PRAGMA user_version;").fetchone()[0]
+        if version > SQLITE_SCHEMA_VERSION:
+            raise RuntimeError(f"Unsupported SQLite schema version: {version}")
+        _initialize_system_db(conn)
+    finally:
+        conn.close()
+
+
+def _initialize_system_db(conn: sqlite3.Connection):
 
     with conn:
 
@@ -238,6 +358,14 @@ def init_system_db():
 
             status TEXT DEFAULT 'submitted',
 
+            is_correct INTEGER DEFAULT 0,
+
+            score INTEGER DEFAULT 0,
+
+            eval_status TEXT DEFAULT 'pending',
+
+            feedback TEXT DEFAULT '',
+
             UNIQUE(user_id, question_id)
 
         );
@@ -305,59 +433,11 @@ def init_system_db():
 
 
 
-        # Insert or sync default master key
+        migrate_system_db(conn)
 
+        import admin_security
+        admin_security.initialize_secret(conn, os.getenv("ADMIN_MASTER_KEY"))
         cur = conn.cursor()
-
-        env_master_key = os.getenv("ADMIN_MASTER_KEY")
-
-        cur.execute("SELECT value FROM system_settings WHERE key = 'admin_master_key';")
-
-        existing_row = cur.fetchone()
-
-        if not existing_row:
-
-            initial_key = env_master_key.strip() if env_master_key else "admin123"
-
-            cur.execute(
-
-                "INSERT INTO system_settings (key, value) VALUES ('admin_master_key', ?);",
-
-                (initial_key,)
-
-            )
-
-        elif env_master_key and env_master_key.strip():
-
-            # Jika user mendefinisikan ADMIN_MASTER_KEY eksplisit via env/script, sinkronkan ke database
-
-            cur.execute(
-
-                "UPDATE system_settings SET value = ? WHERE key = 'admin_master_key';",
-
-                (env_master_key.strip(),)
-
-            )
-
-
-
-        # Migrations for newer columns across tables
-        for table, col_def in [
-            ("users", "virtual_db TEXT DEFAULT NULL"),
-            ("users", "selected_category TEXT DEFAULT NULL"),
-            ("users", "device_id TEXT DEFAULT NULL"),
-            ("questions", "target_database TEXT DEFAULT 'pagila'"),
-            ("questions", "difficulty_level TEXT DEFAULT 'Medium'"),
-            ("questions", "expected_output_image TEXT DEFAULT ''"),
-            ("questions", "question_images TEXT DEFAULT ''"),
-            ("exam_packages", "description TEXT DEFAULT ''"),
-            ("exam_packages", "is_active INTEGER DEFAULT 1"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def};")
-                conn.commit()
-            except Exception:
-                pass
 
         # Check if initial system seeding has been completed or marked
         cur.execute("SELECT value FROM system_settings WHERE key = 'initial_seed_completed';")
@@ -417,14 +497,9 @@ def init_system_db():
             conn.commit()
 
 
-
-    conn.close()
-
-
-
 def get_admin_master_key() -> str:
 
-    """Mengambil password master admin saat ini dari tabel system_settings."""
+    """Return the encoded master credential; never a recoverable password."""
 
     conn = get_sqlite_conn()
 
@@ -436,46 +511,16 @@ def get_admin_master_key() -> str:
 
     conn.close()
 
-    return row["value"] if row else "admin123"
+    return row["value"] if row else ""
 
 
 
 def update_admin_master_key(new_key: str) -> bool:
-
-    """Memperbarui password master admin dan mencatatnya ke log aktivitas."""
-
-    new_key = new_key.strip()
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        cur = conn.cursor()
-
-        cur.execute(
-
-            """
-
-            INSERT INTO system_settings (key, value) VALUES ('admin_master_key', ?)
-
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-
-            """,
-
-            (new_key,)
-
-        )
-
-        cur.execute(
-
-            "INSERT INTO exam_logs (action_type, details) VALUES ('change_master_key', 'Password master admin berhasil diperbarui.');"
-
-        )
-
-    conn.close()
-
+    import admin_security
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("UPDATE system_settings SET value=? WHERE key='admin_master_key'", (admin_security.hash_key(new_key.strip()),))
+        conn.execute("DELETE FROM admin_sessions")
     return True
-
 
 
 def seed_default_questions(conn: sqlite3.Connection):
@@ -581,7 +626,7 @@ def seed_default_questions(conn: sqlite3.Connection):
 
 
 def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds: int = 60) -> bool:
-    if status != "online" or not last_active_str:
+    if status not in ("online", "waiting") or not last_active_str:
         return False
     try:
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -600,9 +645,11 @@ def is_user_active(last_active_str: Optional[str], status: str, timeout_seconds:
 
 
 
-def login_student(nim: str, name: str, ip_address: str, session_token: str, device_id: Optional[str] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+def login_student(nim: str, name: str, ip_address: str, session_token: str, device_id: Optional[str] = None, resume_token: Optional[str] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
     nim = nim.strip()
     name = name.strip()
+    if nim.upper().startswith('ADMIN-PRACTICE-') and SQLITE_REQUEST_PATH.get() is None:
+        return False, None, "Identitas ini khusus simulasi admin."
     clean_dev = (device_id or "").strip()[:64]
 
     if not nim or not name:
@@ -613,6 +660,7 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
 
     conn = get_sqlite_conn()
     try:
+        conn.execute("BEGIN IMMEDIATE;")
         cur = conn.cursor()
 
         # 1. Anti-Joki Perangkat:
@@ -620,12 +668,12 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
         # pastikan tidak ada mahasiswa lain yang sedang aktif di browser/perangkat yang sama.
         if clean_dev:
             cur.execute(
-                "SELECT * FROM users WHERE device_id = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                "SELECT * FROM users WHERE device_id = ? AND LOWER(nim) != LOWER(?) AND status IN ('online', 'waiting');",
                 (clean_dev, nim)
             )
             other_dev_users = cur.fetchall()
             for other_user in other_dev_users:
-                if is_user_active(other_user["last_active"], other_user["status"]):
+                if other_user["session_token"] not in (None, "KICKED_BY_ADMIN"):
                     conn.execute(
                         """
                         INSERT INTO exam_logs (user_id, action_type, details)
@@ -643,12 +691,12 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
         # Pastikan satu IP tidak menjalankan lebih dari 1 mahasiswa aktif sekaligus (kecuali localhost)
         if not ALLOW_SHARED_IP and ip_address not in ("127.0.0.1", "localhost", "::1", "testclient"):
             cur.execute(
-                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status = 'online';",
+                "SELECT * FROM users WHERE ip_address = ? AND LOWER(nim) != LOWER(?) AND status IN ('online', 'waiting');",
                 (ip_address, nim)
             )
             other_active_on_ip = cur.fetchall()
             for other_user in other_active_on_ip:
-                if is_user_active(other_user["last_active"], other_user["status"]):
+                if other_user["session_token"] not in (None, "KICKED_BY_ADMIN"):
                     conn.execute(
                         """
                         INSERT INTO exam_logs (user_id, action_type, details)
@@ -673,7 +721,9 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
             old_ip = existing_user["ip_address"]
             old_dev = existing_user["device_id"] if "device_id" in existing_user.keys() else None
             user_status = existing_user["status"]
-            last_active = existing_user["last_active"]
+
+            if existing_user["session_token"] == "KICKED_BY_ADMIN":
+                return False, None, "Sesi Anda dihentikan pengawas. Minta pengawas membebaskan sesi sebelum login kembali."
 
             # 2a. Verifikasi Nama (Mencegah mahasiswa login dengan NIM orang lain)
             if reg_name.strip().lower() != name.lower():
@@ -691,8 +741,11 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
                 return False, None, f"NIM {reg_nim} sudah terdaftar atas nama '{reg_name}'. Nama yang Anda masukkan tidak cocok. Pastikan Anda tidak menggunakan NIM mahasiswa lain!"
 
             # 2b. Enforce Unique Active NIM: Cek apakah NIM sedang aktif di sesi ujian
-            active = is_user_active(last_active, user_status)
-            is_same_device = (clean_dev and old_dev and clean_dev == old_dev) or (old_ip == ip_address)
+            active = user_status in ("online", "waiting") and bool(existing_user["session_token"])
+            is_same_device = bool(
+                resume_token and resume_token == existing_user["session_token"]
+                and (not old_dev or (clean_dev and clean_dev == old_dev))
+            )
 
             if active and not is_same_device:
                 # Perangkat/IP LAIN mencoba login dengan NIM yang SEDANG AKTIF!
@@ -709,7 +762,7 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
                 conn.commit()
                 return False, None, f"NIM {reg_nim} sedang aktif digunakan dalam sesi ujian pada perangkat lain (IP: {old_ip}). Setiap mahasiswa hanya dapat aktif pada 1 sesi ujian dengan NIM unik. Minta pengawas untuk 'Bebaskan Sesi' jika perangkat Anda bermasalah."
 
-            # Sesi diizinkan (melanjutkan sesi aktif di perangkat sama, atau login ulang setelah offline/timeout/reset pengawas)
+            # Kunci perangkat bertahan sampai logout atau dibebaskan pengawas.
             action_type = 'resume_session' if active else 'login'
             action_desc = f"Mahasiswa {reg_nim} melanjutkan sesi pada IP {ip_address}" if active else f"Mahasiswa {reg_nim} login kembali dari IP {ip_address}"
 
@@ -770,118 +823,78 @@ def login_student(nim: str, name: str, ip_address: str, session_token: str, devi
 
 
 
+class StudentAccessError(Exception):
+    def __init__(self, message: str, status_code: int = 401, code: str = "invalid_session", exam_state=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.exam_state = exam_state
+
+
+def require_student_access(nim, session_token, request_ip, *, active=False, category=False,
+                           revision=None, conn=None):
+    if not nim or not session_token:
+        raise StudentAccessError("Sesi tidak ditemukan. Silakan login kembali.")
+    if conn is None:
+        with closing(get_sqlite_conn()) as connection:
+            return require_student_access(nim, session_token, request_ip, active=active,
+                                          category=category, revision=revision, conn=connection)
+    row = conn.execute("""
+        SELECT u.*,
+            COALESCE((SELECT value FROM system_settings WHERE key='exam_state'), 'waiting') AS exam_state,
+            COALESCE((SELECT value FROM system_settings WHERE key='exam_revision'), '0') AS exam_revision
+        FROM users u WHERE LOWER(u.nim)=LOWER(?);
+    """, (nim,)).fetchone()
+    if not row:
+        raise StudentAccessError("Pengguna tidak ditemukan.")
+    user = dict(row)
+    if user["session_token"] == "KICKED_BY_ADMIN":
+        raise StudentAccessError("Sesi ujian Anda telah dihentikan oleh pengawas.")
+    if user["status"] not in ("online", "waiting") or user["session_token"] != session_token:
+        raise StudentAccessError("Sesi Anda telah berakhir atau telah diganti. Silakan login kembali.")
+    if user["ip_address"] != request_ip:
+        raise StudentAccessError("Alamat IP berubah. Silakan login ulang dari perangkat yang sama.")
+    if active and user["exam_state"] != "active":
+        message = "Ujian telah selesai." if user["exam_state"] == "finished" else "Ujian belum dimulai."
+        raise StudentAccessError(message, 403, "exam_not_active", user["exam_state"])
+    if revision is not None and str(revision) != user["exam_revision"]:
+        raise StudentAccessError("Status ujian berubah saat permintaan diproses. Jawaban belum disimpan.",
+                                 403, "exam_changed", user["exam_state"])
+    if category:
+        package = conn.execute("SELECT is_active FROM exam_packages WHERE code=?;",
+                               (user["selected_category"],)).fetchone()
+        if not package or not package["is_active"]:
+            raise StudentAccessError("Pilih paket soal aktif sebelum melanjutkan.", 403, "package_required")
+    return user
+
+
 def validate_student_session(nim: str, session_token: str, request_ip: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM users WHERE LOWER(nim) = LOWER(?);", (nim,))
-
-    user = cur.fetchone()
-
-    conn.close()
+    try:
+        return True, require_student_access(nim, session_token, request_ip), "Valid"
+    except StudentAccessError as error:
+        return False, None, str(error)
 
 
-
-    if not user:
-
-        return False, None, "Pengguna tidak ditemukan."
-
-
-
-    user_dict = dict(user)
-
-
-
-    # Cek apakah sesi dihentikan atau di-reset oleh pengawas
-
-    if user_dict.get("session_token") == "KICKED_BY_ADMIN":
-
-        return False, user_dict, "Sesi ujian Anda telah dihentikan oleh pengawas."
-
-
-
-    if user_dict.get("status") == "offline":
-
-        return False, user_dict, "Sesi Anda telah berakhir atau berstatus offline."
-
-
-
-    # Verifikasi token sesi unik
-
-    if user_dict.get("session_token") != session_token:
-
-        return False, user_dict, "NIM Anda sedang dibuka dari perangkat atau tab browser lain!"
-
-
-
-    # Verifikasi IP binding
-
-    if user_dict.get("ip_address") != request_ip:
-
-        return False, user_dict, f"Alamat IP Anda berubah ({request_ip} vs {user_dict.get('ip_address')}). Silakan login ulang."
-
-
-
-    return True, user_dict, "Valid"
-
-
-
-def update_student_heartbeat(user_id: int):
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute(
-
-            """
-
-            UPDATE users
-
-            SET last_active = CURRENT_TIMESTAMP, status = 'online'
-
-            WHERE id = ?;
-
-            """,
-
-            (user_id,)
-
-        )
-
-    conn.close()
-
+def update_student_heartbeat(user_id: int, session_token: str, request_ip: str):
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        row = conn.execute("SELECT nim FROM users WHERE id=?", (user_id,)).fetchone()
+        user = require_student_access(row["nim"] if row else None, session_token, request_ip, conn=conn)
+        target_status = "online" if user["exam_state"] == "active" else "waiting"
+        conn.execute("UPDATE users SET last_active=CURRENT_TIMESTAMP, status=? WHERE id=?;",
+                     (target_status, user_id))
+        return user
 
 
 def logout_student(nim: str, session_token: str):
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        cur = conn.cursor()
-
-        cur.execute("SELECT id FROM users WHERE LOWER(nim) = LOWER(?) AND session_token = ?;", (nim, session_token))
-
-        row = cur.fetchone()
-
-        if row:
-
-            user_id = row["id"]
-
-            conn.execute("UPDATE users SET status = 'offline', session_token = NULL WHERE id = ?;", (user_id,))
-
-            conn.execute(
-
-                "INSERT INTO exam_logs (user_id, action_type, details) VALUES (?, 'logout', 'Mahasiswa logout manual');",
-
-                (user_id,)
-
-            )
-
-    conn.close()
-
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        user = conn.execute("""SELECT id FROM users WHERE LOWER(nim)=LOWER(?)
+            AND session_token=? AND status IN ('online','waiting')""", (nim, session_token)).fetchone()
+        if user:
+            conn.execute("UPDATE users SET status='offline',session_token=NULL,device_id=NULL WHERE id=?", (user["id"],))
+            conn.execute("INSERT INTO exam_logs (user_id, action_type, details) VALUES (?, 'logout', 'Mahasiswa logout manual')",
+                         (user["id"],))
 
 
 def clear_student_session_lock(nim: str) -> Tuple[bool, str]:
@@ -929,8 +942,14 @@ def clear_student_session_lock(nim: str) -> Tuple[bool, str]:
 
 
 def kick_student(nim: str) -> bool:
-    success, _ = clear_student_session_lock(nim)
-    return success
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        user = conn.execute("SELECT id FROM users WHERE LOWER(nim)=LOWER(?)", (nim,)).fetchone()
+        if user:
+            conn.execute("UPDATE users SET status='offline',session_token='KICKED_BY_ADMIN' WHERE id=?", (user["id"],))
+            conn.execute("INSERT INTO exam_logs (user_id, action_type, details) VALUES (?, 'kick_student', 'Sesi dihentikan pengawas; login diblokir sampai sesi dibebaskan.')",
+                         (user["id"],))
+        return bool(user)
 
 
 def stop_all_active_sessions() -> int:
@@ -1002,6 +1021,8 @@ def clear_previous_sessions(clear_logs: bool = False) -> Dict[str, int]:
 
     with conn:
 
+        conn.execute("BEGIN IMMEDIATE;")
+        _set_exam_state(conn, "waiting")
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(*) FROM users;")
@@ -1128,6 +1149,8 @@ def get_all_questions(include_expected_query: bool = False, category: Optional[s
         if not include_expected_query:
 
             item.pop("expected_query", None)
+            item.pop("setup_query", None)
+            item.pop("reference_validation", None)
 
         result.append(_enrich_question_dict(item))
 
@@ -1162,6 +1185,8 @@ def get_questions_by_category(category: str, include_expected_query: bool = Fals
         if not include_expected_query:
 
             item.pop("expected_query", None)
+            item.pop("setup_query", None)
+            item.pop("reference_validation", None)
 
         result.append(_enrich_question_dict(item))
 
@@ -1172,43 +1197,15 @@ def get_questions_by_category(category: str, include_expected_query: bool = Fals
 
 
 def get_available_categories() -> List[Dict[str, Any]]:
-    """Returns distinct categories of questions present in the database, prioritizing active configured packages."""
-    pkgs = get_all_packages(include_inactive=False)
-    if pkgs:
-        res = []
-        for p in pkgs:
-            p_dict = dict(p)
-            p_dict["category"] = p["code"]
-            p_dict["count"] = p.get("total_questions", 0)
-            p_dict["total_questions"] = p.get("total_questions", 0)
-            p_dict["question_count"] = p.get("total_questions", 0)
-            p_dict["total_score"] = p.get("total_score", 0)
-            p_dict["total_weight"] = p.get("total_score", 0)
-            res.append(p_dict)
-        return res
-
-    conn = get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT category, COUNT(*) as count, SUM(score_weight) as total_score
-        FROM questions
-        GROUP BY category
-        ORDER BY category;
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return [{
-        "category": r[0],
-        "code": r[0],
-        "name": f"Paket {r[0]}",
-        "description": "",
-        "count": r[1],
-        "total_questions": r[1],
-        "question_count": r[1],
-        "total_score": r[2] or 0,
-        "total_weight": r[2] or 0
-    } for r in rows]
-
+    result = []
+    for package in get_all_packages(include_inactive=False):
+        if not package.get("total_questions"):
+            continue
+        item = dict(package)
+        item.update(category=package["code"], count=package["total_questions"],
+                    question_count=package["total_questions"], total_weight=package.get("total_score", 0))
+        result.append(item)
+    return result
 
 
 def get_all_packages(include_inactive: bool = True) -> List[Dict[str, Any]]:
@@ -1321,7 +1318,7 @@ def get_package_by_code(code: str) -> Optional[Dict[str, Any]]:
 
 
 
-def create_package(code: str, name: str, description: str = "", is_active: int = 1) -> Tuple[bool, str, Optional[int]]:
+def create_package(code: str, name: str, description: str = "", is_active: int = 1, guard_exam=False) -> Tuple[bool, str, Optional[int]]:
 
     code = (code or "").strip().upper()
 
@@ -1337,6 +1334,10 @@ def create_package(code: str, name: str, description: str = "", is_active: int =
 
     try:
 
+        conn.execute('BEGIN IMMEDIATE')
+        state=conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if guard_exam and state and state[0]=='active':
+            raise StudentAccessError('Akhiri ujian sebelum membuat paket.',409,'exam_active')
         cur.execute("INSERT INTO exam_packages (code, name, description, is_active) VALUES (?, ?, ?, ?);", (code, name, description, is_active))
 
         pkg_id = cur.lastrowid
@@ -1355,140 +1356,74 @@ def create_package(code: str, name: str, description: str = "", is_active: int =
 
 
 
-def update_package(code: str, name: Optional[str] = None, description: Optional[str] = None, is_active: Optional[int] = None) -> Tuple[bool, str]:
-
-    code = (code or "").strip().upper()
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    fields = []
-
-    vals = []
-
-    if name is not None:
-
-        fields.append("name = ?")
-
-        vals.append(name.strip())
-
-    if description is not None:
-
-        fields.append("description = ?")
-
-        vals.append(description.strip())
-
-    if is_active is not None:
-
-        fields.append("is_active = ?")
-
-        vals.append(1 if is_active else 0)
-
-    if not fields:
-
-        conn.close()
-
-        return False, "Tidak ada data yang diperbarui."
-
-    vals.append(code)
-
-    try:
-
-        cur.execute(f"UPDATE exam_packages SET {', '.join(fields)} WHERE code = ?;", vals)
-
-        conn.commit()
-
-        return True, f"Paket {code} berhasil diperbarui."
-
-    except Exception as e:
-
-        return False, str(e)
-
-    finally:
-
-        conn.close()
+def package_revision(package):
+    fields=[package['id'],package['code'],package['name'],package['description'] or '',bool(package['is_active'])]
+    return hashlib.sha256(json.dumps(fields,ensure_ascii=True).encode()).hexdigest()
 
 
-
-def delete_package(code: str, delete_questions: bool = False) -> Tuple[bool, str]:
-
-    code = (code or "").strip().upper()
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    try:
-
-        cur.execute("SELECT COUNT(*) FROM users WHERE selected_category = ?;", (code,))
-
-        locked_students = cur.fetchone()[0]
-
-        if locked_students > 0:
-
-            return False, f"Tidak dapat menghapus Paket {code}: Masih ada {locked_students} mahasiswa terkunci pada paket ini."
-
-        cur.execute("DELETE FROM exam_packages WHERE code = ?;", (code,))
-
-        if delete_questions:
-
-            cur.execute("DELETE FROM questions WHERE category = ?;", (code,))
-
-        conn.commit()
-
-        return True, f"Paket {code} berhasil dihapus."
-
-    except Exception as e:
-
-        return False, str(e)
-
-    finally:
-
-        conn.close()
-
-
-
-def lock_student_category(nim: str, category: str) -> Tuple[bool, str]:
-
-    clean_nim = (nim or "").strip()
-
-    clean_cat = (category or "").strip().upper()
-
-    if not clean_nim or not clean_cat:
-
-        return False, "NIM dan Paket Soal harus valid."
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    cur.execute("SELECT selected_category FROM users WHERE nim = ?;", (clean_nim,))
-
-    row = cur.fetchone()
-
+def _package_write_guard(conn,code,expected_revision=None):
+    state=conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+    if state and state[0]=='active':
+        raise StudentAccessError('Akhiri ujian sebelum mengubah paket.',409,'exam_active')
+    row=conn.execute('SELECT * FROM exam_packages WHERE code=?',(code,)).fetchone()
     if not row:
+        raise StudentAccessError('Paket tidak ditemukan.',404,'package_missing')
+    if expected_revision is not None and package_revision(row)!=expected_revision:
+        raise StudentAccessError('Paket berubah. Muat ulang sebelum menyimpan atau menghapus.',409,'package_conflict')
 
-        conn.close()
 
-        return False, "Mahasiswa tidak ditemukan."
+def update_package(code, name=None, description=None, is_active=None, expected_revision=None):
+    code=(code or '').strip().upper()
+    if name is not None and not name.strip():
+        raise StudentAccessError('Nama paket wajib diisi.',422,'package_name')
+    fields=[];values=[]
+    for column,value in (('name',name),('description',description),('is_active',is_active)):
+        if value is not None:
+            fields.append(column+'=?')
+            values.append(int(bool(value)) if column=='is_active' else value.strip())
+    with closing(get_sqlite_conn()) as conn,conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _package_write_guard(conn,code,expected_revision)
+        if not fields:
+            return False,'Tidak ada data yang diperbarui.'
+        conn.execute("UPDATE exam_packages SET "+','.join(fields)+' WHERE code=?',values+[code])
+    return True,f'Paket {code} berhasil diperbarui.'
 
-    current_cat = row[0]
 
-    if current_cat and current_cat != clean_cat:
+def delete_package(code, delete_questions=False, expected_revision=None):
+    code=(code or '').strip().upper()
+    with closing(get_sqlite_conn()) as conn,conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _package_write_guard(conn,code,expected_revision)
+        count=conn.execute('SELECT COUNT(*) FROM users WHERE UPPER(selected_category)=?',(code,)).fetchone()[0]
+        if count:
+            return False,f'Tidak dapat menghapus Paket {code}: Masih ada {count} mahasiswa terkunci pada paket ini.'
+        conn.execute('DELETE FROM exam_packages WHERE code=?',(code,))
+        if delete_questions:
+            conn.execute('DELETE FROM questions WHERE UPPER(category)=?',(code,))
+    return True,f'Paket {code} berhasil dihapus.'
 
-        conn.close()
 
-        return False, f"Paket soal Anda sudah terkunci pada Paket {current_cat}. Hubungi dosen pengawas untuk mereset."
-
-    cur.execute("UPDATE users SET selected_category = ? WHERE nim = ?;", (clean_cat, clean_nim))
-
-    conn.commit()
-
-    conn.close()
-
-    return True, f"Berhasil mengunci Paket {clean_cat}."
-
+def lock_student_category(nim: str, category: str, session_context=None) -> Tuple[bool, str]:
+    clean_cat = (category or "").strip().upper()
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        if session_context:
+            user = require_student_access(nim, session_context["session_token"], session_context["ip_address"],
+                                          active=True, revision=session_context["exam_revision"], conn=conn)
+        else:
+            row = conn.execute("SELECT * FROM users WHERE LOWER(nim)=LOWER(?)", (nim,)).fetchone()
+            user = dict(row) if row else None
+        if not user:
+            return False, "Mahasiswa tidak ditemukan."
+        package = conn.execute("SELECT code FROM exam_packages WHERE code=? AND is_active=1", (clean_cat,)).fetchone()
+        has_questions = conn.execute("SELECT 1 FROM questions WHERE category=? LIMIT 1", (clean_cat,)).fetchone()
+        if not package or not has_questions:
+            return False, "Paket soal tidak tersedia atau belum memiliki soal."
+        if user["selected_category"] and user["selected_category"] != clean_cat:
+            return False, "Paket soal Anda sudah terkunci. Hubungi pengawas untuk mereset."
+        conn.execute("UPDATE users SET selected_category=? WHERE id=?", (clean_cat, user["id"]))
+        return True, f"Berhasil mengunci Paket {clean_cat}."
 
 
 def reset_student_category(nim: str) -> Tuple[bool, str]:
@@ -1499,7 +1434,10 @@ def reset_student_category(nim: str) -> Tuple[bool, str]:
 
     cur = conn.cursor()
 
-    cur.execute("UPDATE users SET selected_category = '' WHERE nim = ?;", (clean_nim,))
+    cur.execute("UPDATE users SET selected_category = '',grading_revision=grading_revision+1 WHERE nim = ?;", (clean_nim,))
+    if cur.rowcount == 0:
+        conn.close()
+        raise StudentAccessError("Mahasiswa tidak ditemukan.",404,"student_missing")
 
     conn.commit()
 
@@ -1509,88 +1447,30 @@ def reset_student_category(nim: str) -> Tuple[bool, str]:
 
 
 def reset_student_by_nim(nim: str) -> Dict[str, Any]:
-    """Mereset data sesi mahasiswa individual berdasarkan NIM."""
     clean_nim = (nim or "").strip()
     if not clean_nim:
         return {"success": False, "message": "NIM tidak boleh kosong."}
-
-    conn = get_sqlite_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, name FROM users WHERE LOWER(nim) = LOWER(?);", (clean_nim,))
-    user = cur.fetchone()
-
-    if not user:
-        conn.close()
-        return {"success": False, "message": f"Mahasiswa dengan NIM '{clean_nim}' tidak ditemukan."}
-
-    user_id = user["id"]
-    user_name = user["name"]
-
-    cur.execute("SELECT COUNT(*) FROM submissions WHERE user_id = ?;", (user_id,))
-    sub_count = cur.fetchone()[0]
-
-    cur.execute("DELETE FROM submissions WHERE user_id = ?;", (user_id,))
-    cur.execute("DELETE FROM users WHERE id = ?;", (user_id,))
-
-    cur.execute(
-        """
-        INSERT INTO exam_logs (action_type, details)
-        VALUES ('reset_student', ?);
-        """,
-        (f"Pengawas / CLI mereset data sesi dan submisi untuk NIM {clean_nim} ({user_name}).",)
-    )
-    conn.commit()
-    conn.close()
-
-    schema_dropped = cleanup_student_sandbox_schema(clean_nim)
-
-    return {
-        "success": True,
-        "nim": clean_nim,
-        "name": user_name,
-        "submissions_cleared": sub_count,
-        "schema_dropped": schema_dropped
-    }
-
-
-
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        user = conn.execute("SELECT id,name,nim FROM users WHERE LOWER(nim)=LOWER(?)", (clean_nim,)).fetchone()
+        if not user:
+            return {"success": False, "message": "Mahasiswa tidak ditemukan."}
+        if not cleanup_student_sandbox_schema(user["nim"]):
+            return {"success": False, "message": "Cleanup sandbox gagal; data mahasiswa dan jawaban tetap disimpan."}
+        count = conn.execute("SELECT count(*) FROM submissions WHERE user_id=?", (user["id"],)).fetchone()[0]
+        conn.execute("DELETE FROM submissions WHERE user_id=?", (user["id"],))
+        conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
+        conn.execute("INSERT INTO exam_logs (action_type,details) VALUES ('reset_student',?)", (f"Pengawas mereset sesi dan workspace NIM {user['nim']}",))
+        return {"success": True, "nim": user["nim"], "name": user["name"], "submissions_cleared": count, "schema_dropped": True}
 
 
 def get_student_virtual_database(nim: Optional[str]) -> Optional[str]:
-    """Returns the student's currently active virtual database name (created via CREATE DATABASE)."""
     if not nim:
         return None
-    clean_nim = str(nim).strip()
-    conn = get_sqlite_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT virtual_db FROM users WHERE LOWER(nim) = LOWER(?);", (clean_nim,))
-        row = cur.fetchone()
-        if row and row[0]:
-            return row[0]
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    with closing(get_sqlite_conn()) as conn:
+        row = conn.execute("SELECT virtual_db FROM users WHERE LOWER(nim)=LOWER(?)", (str(nim).strip(),)).fetchone()
+        return row[0] if row else None
 
-    # Fallback: introspect schema comment in PostgreSQL
-    try:
-        schema_name = get_clean_student_schema_name(clean_nim)
-        conn_pg = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-        cur_pg = conn_pg.cursor()
-        cur_pg.execute("""
-            SELECT description FROM pg_description
-            JOIN pg_namespace ON pg_description.objoid = pg_namespace.oid
-            WHERE pg_namespace.nspname = %s;
-        """, (schema_name,))
-        desc_row = cur_pg.fetchone()
-        cur_pg.close()
-        conn_pg.close()
-        if desc_row and desc_row[0] and desc_row[0].startswith("virtual_db:"):
-            return desc_row[0].replace("virtual_db:", "").strip()
-    except Exception:
-        pass
-    return None
 
 def set_student_virtual_database(nim: Optional[str], db_name: str) -> None:
     """Updates the student's virtual database name."""
@@ -1645,112 +1525,74 @@ def get_question_by_id(question_id: int) -> Optional[Dict[str, Any]]:
 
 
 
-def save_question(
-
-    question_number: int,
-
-    title: str,
-
-    description: str,
-
-    score_weight: int,
-
-    expected_query: Optional[str] = None,
-
-    question_id: Optional[int] = None,
-
-    category: str = "A",
-
-    target_database: str = DEFAULT_EXAM_DB,
-
-    difficulty_level: str = "Medium",
-
-    expected_output_image: Any = "",
-
-    question_images: Any = ""
-
-) -> int:
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        cur = conn.cursor()
-
+def save_question(question_number, title, description, score_weight, expected_query=None, question_id=None,
+                  category="A", target_database=DEFAULT_EXAM_DB, difficulty_level="Medium",
+                  expected_output_image="", question_images="", grading_policy=None, setup_query=None, expected_edit_revision=None):
+    from grading_results import policy_from
+    category = (category or "A").strip().upper()
+    if isinstance(question_number, bool) or not isinstance(question_number, int) or question_number < 1:
+        raise StudentAccessError("Nomor soal harus bilangan bulat positif.", 422, "invalid_question_number")
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if state and state[0] == "active":
+            raise StudentAccessError("Akhiri ujian sebelum mengubah soal.", 409, "exam_active")
+        old_row = conn.execute("SELECT * FROM questions WHERE id=?", (question_id,)).fetchone() if question_id else None
+        if question_id and not old_row:
+            raise StudentAccessError("Soal tidak ditemukan atau sudah dihapus admin lain.", 404, "question_missing")
+        old = dict(old_row) if old_row else {}
+        if old and expected_edit_revision is not None and old["edit_revision"] != expected_edit_revision:
+            raise StudentAccessError("Soal telah diubah admin lain. Muat ulang sebelum menyimpan.", 409, "question_conflict")
+        collision = conn.execute("SELECT id FROM questions WHERE UPPER(category)=? AND question_number=? AND id<>?",
+                                 (category, question_number, question_id or -1)).fetchone()
+        if collision:
+            raise StudentAccessError(f"Paket {category} sudah memiliki soal nomor {question_number}. Pilih nomor lain.",
+                                     409, "question_number_conflict")
+        policy = policy_from(grading_policy if grading_policy is not None else old.get("grading_policy"))
+        policy_json = json.dumps(policy.model_dump(mode="json"), sort_keys=True)
+        setup = setup_query if setup_query is not None else old.get("setup_query", "")
         exp_list = parse_image_urls(expected_output_image)
-        exp_val = json.dumps(exp_list) if len(exp_list) > 1 else (exp_list[0] if exp_list else "")
-
-        q_img_list = parse_image_urls(question_images)
-        q_img_val = json.dumps(q_img_list) if len(q_img_list) > 1 else (q_img_list[0] if q_img_list else "")
-
+        image = json.dumps(exp_list) if len(exp_list)>1 else (exp_list[0] if exp_list else "")
+        images = parse_image_urls(question_images)
+        question_image = json.dumps(images) if len(images)>1 else (images[0] if images else "")
+        values = dict(question_number=question_number,title=title,description=description,score_weight=score_weight,
+                      expected_query=expected_query,category=category,target_database=target_database,
+                      difficulty_level=difficulty_level,expected_output_image=image,question_images=question_image,
+                      grading_policy=policy_json,setup_query=setup)
+        grading_fields = ("question_number","category","expected_query","score_weight","target_database","setup_query")
+        changed = bool(old and (any(old.get(key) != values[key] for key in grading_fields)
+                               or policy_from(old.get("grading_policy")) != policy))
+        values["edit_revision"] = old.get("edit_revision", 0) + 1
+        values["question_revision"] = old.get("question_revision",1) + int(changed)
+        values["reference_validation"] = "unvalidated" if changed or not old else old["reference_validation"]
         if question_id:
-
-            cur.execute(
-
-                """
-
-                UPDATE questions
-
-                SET question_number = ?, title = ?, description = ?, score_weight = ?, expected_query = ?,
-
-                    category = ?, target_database = ?, difficulty_level = ?, expected_output_image = ?, question_images = ?
-
-                WHERE id = ?;
-
-                """,
-
-                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, exp_val, q_img_val, question_id)
-
-            )
-
-            ret_id = question_id
-
+            conn.execute("UPDATE questions SET " + ",".join(key+"=?" for key in values) + " WHERE id=?", (*values.values(),question_id))
+            if changed:
+                conn.execute("UPDATE submissions SET score=0,is_correct=0,eval_status='needs_regrade',feedback='Acuan soal berubah; nilai perlu dievaluasi ulang.' WHERE question_id=?", (question_id,))
         else:
-
-            cur.execute(
-
-                """
-
-                INSERT INTO questions (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, expected_output_image, question_images)
-
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-
-                """,
-
-                (question_number, title, description, score_weight, expected_query, category, target_database, difficulty_level, exp_val, q_img_val)
-
-            )
-
-            ret_id = cur.lastrowid
-
-    conn.close()
-
-    return ret_id
+            question_id = conn.execute("INSERT INTO questions ("+",".join(values)+") VALUES ("+",".join("?" for _ in values)+")", tuple(values.values())).lastrowid
+        return question_id
 
 
-
-def delete_question(question_id: int):
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute("DELETE FROM questions WHERE id = ?;", (question_id,))
-
-    conn.close()
-
+def delete_question(question_id: int, expected_edit_revision=None):
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if state and state[0] == "active":
+            raise StudentAccessError("Akhiri ujian sebelum menghapus soal.", 409, "exam_active")
+        row = conn.execute("SELECT edit_revision FROM questions WHERE id=?", (question_id,)).fetchone()
+        if row and expected_edit_revision is not None and row[0] != expected_edit_revision:
+            raise StudentAccessError("Soal telah diubah admin lain. Muat ulang sebelum menghapus.", 409, "question_conflict")
+        conn.execute("DELETE FROM questions WHERE id=?", (question_id,))
 
 
 def delete_all_questions():
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute("DELETE FROM questions;")
-
-    conn.close()
-
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if state and state[0] == "active":
+            raise StudentAccessError("Akhiri ujian sebelum menghapus soal.", 409, "exam_active")
+        conn.execute("DELETE FROM questions")
 
 
 # ------------------------------------------------------------------------------
@@ -2045,1016 +1887,76 @@ def compare_table_records(
 
 
 def _normalize_cell_value(val: Any) -> Any:
-
-    """Normalizes cell values for reliable comparisons between PostgreSQL and SQLite."""
-
-    if val is None:
-        return None
-
-    if isinstance(val, bool):
-        return val
-
-    if isinstance(val, (int, float)):
-        return round(float(val), 4)
-
-    if isinstance(val, decimal.Decimal):
-        return round(float(val), 4)
-
-    if isinstance(val, (datetime.date, datetime.datetime)):
-        return str(val)
-
-    val_str = str(val).strip()
-
-    try:
-
-        num = float(val_str)
-
-        return round(num, 4)
-
-    except ValueError:
-
-        pass
-
-    return val_str.lower()
-
-
-
-def evaluate_sql_submission(
-
-    submitted_query: str,
-
-    expected_query: Optional[str],
-
-    score_weight: int = 10,
-
-    target_db: str = DEFAULT_EXAM_DB,
-
-    active_db: str = DEFAULT_EXAM_DB,
-
-    nim: Optional[str] = None
-
-) -> Dict[str, Any]:
-
-    """
-
-    Evaluates a student's SQL submission.
-
-    Supports:
-
-    - Target database connection validation (checks active_db == target_db)
-
-    - Deep DDL evaluation (CREATE TABLE) using PostgreSQL Catalog Inspection & Table Comparison
-
-    - DML evaluation (INSERT INTO) in student sandbox schema
-
-    - DROP TABLE / DROP DATABASE evaluations in student sandbox schema
-
-    - SELECT query comparison against lecturer expected_query (columns, rows, values, ordering)
-
-    - Constructive Indonesian feedback with HackerRank style status
-
-    """
-
-    submitted_query = (submitted_query or "").strip()
-
-    if not submitted_query:
-
-        return {
-
-            "is_correct": False,
-
-            "score": 0,
-
-            "eval_status": "empty",
-
-            "feedback": "Query jawaban masih kosong. Silakan tuliskan kueri SQL Anda.",
-
-            "student_result": None
-
-        }
-
-
-
-    target_db_clean = (target_db or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
-
-    active_db_clean = (active_db or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
-
-
-
-    # 1. Multi-Database connection guard
-
-    if target_db_clean != active_db_clean:
-
-        return {
-
-            "is_correct": False,
-
-            "score": 0,
-
-            "eval_status": "wrong_database",
-
-            "feedback": f"Koneksi database salah! Soal ini memerlukan koneksi ke database '{target_db_clean}', tetapi Anda sedang terhubung ke '{active_db_clean}'. Silakan alihkan database di panel atas.",
-
-            "student_result": None
-
-        }
-
-
-
-    # 2. Dangerous SQL check
-
-    is_sandbox = (target_db_clean == "sandbox_pribadi")
-
-    danger_err = check_dangerous_sql(submitted_query, is_sandbox_student=is_sandbox)
-
-    if danger_err:
-
-        return {
-
-            "is_correct": False,
-
-            "score": 0,
-
-            "eval_status": "security_violation",
-
-            "feedback": f"Pelanggaran Keamanan: {danger_err}",
-
-            "student_result": None
-
-        }
-
-
-
-    clean_q_upper = submitted_query.upper().strip()
-
-
-
-    # 3. Handle CREATE DATABASE in sandbox
-
-    match_cdb_exp = re.search(r'CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)', expected_query or "", re.IGNORECASE)
-
-    match_cdb_stud = re.search(r'CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)', submitted_query, re.IGNORECASE)
-
-
-
-    if is_sandbox and match_cdb_exp:
-
-        exp_db = match_cdb_exp.group(1).lower()
-
-        if not match_cdb_stud:
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "wrong_data",
-
-                "feedback": "Kueri Anda belum memuat perintah CREATE DATABASE sesuai instruksi soal. Pastikan Anda membuat database dengan nama yang diminta.",
-
-                "student_result": None
-
-            }
-
-        stud_db = match_cdb_stud.group(1).lower()
-
-        if stud_db != exp_db:
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "wrong_database_name",
-
-                "feedback": f"Nama database '{stud_db}' belum sesuai dengan instruksi soal. Periksa kembali penamaan database Anda.",
-
-                "student_result": None
-
-            }
-
-
-
-        exec_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
-        if not exec_res.get("success"):
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "syntax_error",
-
-                "feedback": f"Error Eksekusi: {exec_res.get('error')}",
-
-                "student_result": exec_res
-
-            }
-
-
-
-        # Check if expected query ALSO expects a table
-
-        match_tbl_exp = re.search(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)', expected_query or "", re.IGNORECASE)
-
-        if match_tbl_exp:
-
-            exp_tbl = match_tbl_exp.group(1).lower()
-
-            schema_info = get_database_schema(db_name="sandbox_pribadi", nim=nim)
-
-            if exp_tbl in [t.lower() for t in schema_info.keys()]:
-
-                return {
-
-                    "is_correct": True,
-
-                    "score": int(score_weight),
-
-                    "eval_status": "correct",
-
-                    "feedback": f"Sempurna! Database '{stud_db}' dan tabel '{exp_tbl}' berhasil dibuat di sandbox pribadi Anda (+{score_weight} Poin).",
-
-                    "student_result": exec_res
-
-                }
-
-            else:
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "table_not_found",
-
-                    "feedback": f"Database '{stud_db}' valid, namun tabel '{exp_tbl}' belum berhasil dibuat di sandbox pribadi Anda.",
-
-                    "student_result": exec_res
-
-                }
-
-        else:
-
-            return {
-
-                "is_correct": True,
-
-                "score": int(score_weight),
-
-                "eval_status": "correct",
-
-                "feedback": f"Sempurna! Perintah CREATE DATABASE '{stud_db}' berhasil dijalankan di sandbox pribadi Anda (+{score_weight} Poin).",
-
-                "student_result": exec_res
-
-            }
-
-
-
-    # Handle DROP DATABASE in sandbox
-
-    match_ddb_exp = re.search(r'DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z0-9_]+)', expected_query or "", re.IGNORECASE)
-
-    match_ddb_stud = re.search(r'DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z0-9_]+)', submitted_query, re.IGNORECASE)
-
-
-
-    if is_sandbox and (match_ddb_exp or (match_ddb_stud and "CREATE TABLE" not in clean_q_upper and "SELECT" not in clean_q_upper)):
-
-        if match_ddb_exp:
-
-            exp_db = match_ddb_exp.group(1).lower()
-
-            if not match_ddb_stud:
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "wrong_data",
-
-                    "feedback": "Kueri Anda belum memuat perintah DROP DATABASE sesuai instruksi soal.",
-
-                    "student_result": None
-
-                }
-
-            stud_db = match_ddb_stud.group(1).lower()
-
-            if stud_db != exp_db:
-
-                return {
-
-                    "is_correct": False,
-
-                    "score": 0,
-
-                    "eval_status": "wrong_database_name",
-
-                    "feedback": f"Nama database '{stud_db}' yang dihapus belum sesuai dengan instruksi soal. Periksa kembali nama database target.",
-
-                    "student_result": None
-
-                }
-
-
-
-        exec_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
-        if not exec_res.get("success"):
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "syntax_error",
-
-                "feedback": f"Error Eksekusi: {exec_res.get('error')}",
-
-                "student_result": exec_res
-
-            }
-
-        dropped_name = match_ddb_stud.group(1) if match_ddb_stud else (match_ddb_exp.group(1) if match_ddb_exp else "database")
-
-        return {
-
-            "is_correct": True,
-
-            "score": int(score_weight),
-
-            "eval_status": "correct",
-
-            "feedback": f"Sempurna! Database '{dropped_name}' dan seluruh tabelnya berhasil dibersihkan dari sandbox pribadi Anda (+{score_weight} Poin).",
-
-            "student_result": exec_res
-
-        }
-
-
-
-    # 4. Handle DDL (CREATE TABLE) with Deep Catalog & Multi-Table Structure Inspection (Fase 2)
-    exp_tables = extract_all_table_names_from_ddl(expected_query or "")
-    exp_dml_tables = extract_all_table_names_from_dml(expected_query or "")
-    has_exp_ddl = bool(exp_tables)
-    has_exp_dml = bool(exp_dml_tables)
-    has_exp_select = bool(re.search(r'\bSELECT\b', expected_query or "", re.IGNORECASE))
-
-    is_ddl_question = bool(has_exp_ddl and not has_exp_dml and not has_exp_select)
-    if is_ddl_question or ("CREATE TABLE" in clean_q_upper):
-        if is_ddl_question and not ("CREATE TABLE" in clean_q_upper):
-            fb_tbl = (
-                f"Kueri Anda belum memuat perintah CREATE TABLE untuk membuat tabel ({', '.join(exp_tables)}) sesuai instruksi soal."
-                if EXAM_HINT_MODE == "guided"
-                else "Kueri Anda belum memuat perintah CREATE TABLE untuk seluruh tabel yang diminta pada instruksi soal."
-            )
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "missing_table",
-                "feedback": fb_tbl,
-                "student_result": None
-            }
-
-        # For DDL evaluation in sandbox, drop existing target tables first so fresh query can execute cleanly
-        if is_sandbox:
-            target_drop_tables = exp_tables if exp_tables else extract_all_table_names_from_ddl(submitted_query)
-            if target_drop_tables:
-                student_schema = get_clean_student_schema_name(nim)
-                try:
-                    conn_clean = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-                    conn_clean.autocommit = True
-                    cur_clean = conn_clean.cursor()
-                    for t in reversed(target_drop_tables):
-                        cur_clean.execute(sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE;").format(sql.Identifier(student_schema), sql.Identifier(t)))
-                    cur_clean.close()
-                    conn_clean.close()
-                except Exception as e:
-                    print(f"Warning dropping student sandbox tables before DDL eval: {e}")
-
-        # Execute in student's sandbox
-        stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
-        # If execution failed with syntax error other than 'already exists'
-        if not stud_res.get("success"):
-            err_msg = stud_res.get("error", "")
-            if "already exists" not in err_msg.lower():
-                return {
-                    "is_correct": False,
-                    "score": 0,
-                    "eval_status": "syntax_error",
-                    "feedback": f"Error Sintaks SQL: {err_msg}",
-                    "student_result": stud_res
-                }
-
-        # Now perform Deep PostgreSQL Catalog Inspection against Lecturer's Expected DDL
-        student_schema = get_clean_student_schema_name(nim)
-
-        if exp_tables:
-            # Compile reference DDL to get expected metadata for ALL tables
-            all_ref_meta = compile_all_reference_ddls(expected_query, dbname=DEFAULT_EXAM_DB)
-            if "_error" in all_ref_meta:
-                return {
-                    "is_correct": False,
-                    "score": 0,
-                    "eval_status": "reference_error",
-                    "feedback": f"Peringatan Evaluator: {all_ref_meta['_error']}",
-                    "student_result": stud_res
-                }
-
-            stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-            diagnostics = {}
-            try:
-                for exp_t in exp_tables:
-                    ref_meta = all_ref_meta.get(exp_t.lower())
-                    if not ref_meta or not ref_meta.get("exists"):
-                        continue
-
-                    stud_meta = inspect_table_catalog(student_schema, exp_t, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
-                    diagnostics[exp_t] = stud_meta
-
-                    if not stud_meta.get("exists", False):
-                        if len(exp_tables) > 1:
-                            msg = f"Kueri Anda belum lengkap. Dari {len(exp_tables)} tabel yang diminta ({', '.join(exp_tables)}), tabel '{exp_t}' belum dibuat di skema database pribadi Anda."
-                        else:
-                            msg = f"Tabel '{exp_t}' belum ditemukan di skema database pribadi Anda. Pastikan perintah CREATE TABLE berhasil dijalankan."
-                        return {
-                            "is_correct": False,
-                            "score": 0,
-                            "eval_status": "missing_table",
-                            "feedback": msg,
-                            "student_result": stud_res,
-                            "diagnostics": diagnostics
-                        }
-
-                    is_valid, comp_msg, details = compare_table_structures(ref_meta, stud_meta)
-                    if not is_valid:
-                        return {
-                            "is_correct": False,
-                            "score": 0,
-                            "eval_status": "wrong_schema",
-                            "feedback": comp_msg,
-                            "student_result": stud_res,
-                            "diagnostics": details
-                        }
-            finally:
-                if stud_conn and not stud_conn.closed:
-                    stud_conn.close()
-
-            if len(exp_tables) > 1:
-                tbl_list_str = ", ".join(exp_tables)
-                feedback_msg = f"Sempurna! Seluruh {len(exp_tables)} tabel ({tbl_list_str}) beserta kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY 100% valid sesuai spesifikasi (+{score_weight} Poin)."
-            else:
-                feedback_msg = f"Sempurna! Struktur tabel '{exp_tables[0]}' (kolom, tipe data, NOT NULL, PRIMARY KEY, UNIQUE, dan FOREIGN KEY) 100% valid sesuai spesifikasi (+{score_weight} Poin)."
-
-            return {
-                "is_correct": True,
-                "score": int(score_weight),
-                "eval_status": "correct",
-                "feedback": feedback_msg,
-                "student_result": stud_res,
-                "diagnostics": diagnostics
-            }
-        else:
-            # Fallback if expected_query is not provided: verify table exists in student schema
-            submitted_tables = extract_all_table_names_from_ddl(submitted_query)
-            if not submitted_tables:
-                return {
-                    "is_correct": False,
-                    "score": 0,
-                    "eval_status": "syntax_error",
-                    "feedback": "Sintaks CREATE TABLE tidak valid: nama tabel tidak dapat diidentifikasi.",
-                    "student_result": None
-                }
-
-            stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-            try:
-                for tbl in submitted_tables:
-                    stud_meta = inspect_table_catalog(student_schema, tbl, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
-                    if not stud_meta.get("exists"):
-                        return {
-                            "is_correct": False,
-                            "score": 0,
-                            "eval_status": "table_not_found",
-                            "feedback": f"Tabel '{tbl}' belum berhasil dibuat di skema pribadi Anda.",
-                            "student_result": stud_res
-                        }
-            finally:
-                if stud_conn and not stud_conn.closed:
-                    stud_conn.close()
-
-            return {
-                "is_correct": True,
-                "score": int(score_weight),
-                "eval_status": "correct",
-                "feedback": f"Tabel ({', '.join(submitted_tables)}) berhasil dibuat di skema pribadi Anda (+{score_weight} Poin).",
-                "student_result": stud_res
-            }
-
-
-
-    # 5. Handle DML (INSERT INTO) with Deep Row Count & Value Inspection (Fase 3)
-    stud_dml_tables = extract_all_table_names_from_dml(submitted_query or "")
-    target_dml_tables = exp_dml_tables if exp_dml_tables else stud_dml_tables
-
-    is_dml_question = bool(has_exp_dml and not has_exp_select)
-    if is_dml_question or ("INSERT INTO" in clean_q_upper):
-        if is_dml_question and not ("INSERT INTO" in clean_q_upper):
-            fb_dml = (
-                f"Kueri Anda belum memuat perintah INSERT INTO untuk memasukkan data ke tabel ({', '.join(exp_dml_tables)}) sesuai instruksi soal."
-                if EXAM_HINT_MODE == "guided"
-                else "Kueri Anda belum memuat perintah INSERT INTO untuk seluruh tabel yang diminta pada instruksi soal."
-            )
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "missing_dml",
-                "feedback": fb_dml,
-                "student_result": None
-            }
-
-        if not target_dml_tables:
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "syntax_error",
-                "feedback": "Sintaks INSERT INTO tidak valid: nama tabel target tidak dapat diidentifikasi.",
-                "student_result": None
-            }
-
-        student_schema = get_clean_student_schema_name(nim)
-
-        # Check if all target tables exist in student schema
-        stud_conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-        try:
-            for t_name in target_dml_tables:
-                stud_meta = inspect_table_catalog(student_schema, t_name, conn=stud_conn, dbname=DEFAULT_EXAM_DB)
-                if not stud_meta.get("exists"):
-                    return {
-                        "is_correct": False,
-                        "score": 0,
-                        "eval_status": "table_not_found",
-                        "feedback": f"Tabel '{t_name}' belum dibuat di skema database pribadi Anda. Silakan jalankan perintah CREATE TABLE terlebih dahulu pada soal sebelumnya.",
-                        "student_result": None
-                    }
-        finally:
-            if stud_conn and not stud_conn.closed:
-                stud_conn.close()
-
-        # Execute student's INSERT INTO query in sandbox
-        stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
-        # If execution failed with syntax error other than duplicate key / unique constraint
-        if not stud_res.get("success"):
-            err_msg = stud_res.get("error", "")
-            is_dup_key = ("duplicate key" in err_msg.lower() or "unique constraint" in err_msg.lower())
-            if not is_dup_key:
-                return {
-                    "is_correct": False,
-                    "score": 0,
-                    "eval_status": "syntax_error",
-                    "feedback": f"Error Eksekusi SQL: {err_msg}",
-                    "student_result": stud_res
-                }
-
-        # If lecturer provided expected_query containing INSERT INTO
-        if expected_query and ("INSERT INTO" in expected_query.upper()):
-            # Compile reference DML in isolated temporary schema
-            ref_dml_res = compile_reference_dml(expected_query, target_dml_tables, student_schema, dbname=DEFAULT_EXAM_DB)
-            if not ref_dml_res.get("success"):
-                return {
-                    "is_correct": False,
-                    "score": 0,
-                    "eval_status": "reference_error",
-                    "feedback": f"Peringatan Evaluator: {ref_dml_res.get('error')}",
-                    "student_result": stud_res
-                }
-
-            all_diagnostics = {}
-            for t_name in target_dml_tables:
-                # Query student's current records in sandbox
-                stud_query_res = execute_student_query(f"SELECT * FROM {t_name};", active_db=target_db_clean, nim=nim)
-                if not stud_query_res.get("success"):
-                    return {
-                        "is_correct": False,
-                        "score": 0,
-                        "eval_status": "syntax_error",
-                        "feedback": f"Gagal membaca data dari tabel '{t_name}': {stud_query_res.get('error')}",
-                        "student_result": stud_query_res
-                    }
-
-                t_ref_info = ref_dml_res.get("tables", {}).get(t_name.lower(), {})
-                ref_cols = t_ref_info.get("columns", [])
-                ref_rows = t_ref_info.get("rows", [])
-
-                is_valid, comp_msg, details = compare_table_records(
-                    ref_columns=ref_cols,
-                    ref_rows=ref_rows,
-                    stud_columns=stud_query_res.get("columns", []),
-                    stud_rows=stud_query_res.get("rows", []),
-                    table_name=t_name
-                )
-                all_diagnostics[t_name] = details
-                if not is_valid:
-                    return {
-                        "is_correct": False,
-                        "score": 0,
-                        "eval_status": "wrong_data",
-                        "feedback": comp_msg,
-                        "student_result": stud_query_res,
-                        "diagnostics": all_diagnostics
-                    }
-
-            if len(target_dml_tables) > 1:
-                feedback_msg = f"Sempurna! Seluruh data pada {len(target_dml_tables)} tabel ({', '.join(target_dml_tables)}) berhasil diisi dan 100% cocok dengan kunci acuan dosen (+{score_weight} Poin)."
-            else:
-                feedback_msg = f"Sempurna! Seluruh data pada tabel '{target_dml_tables[0]}' berhasil diisi dan 100% cocok dengan kunci acuan dosen (+{score_weight} Poin)."
-
-            return {
-                "is_correct": True,
-                "score": int(score_weight),
-                "eval_status": "correct",
-                "feedback": feedback_msg,
-                "student_result": stud_res,
-                "diagnostics": all_diagnostics
-            }
-        else:
-            # Fallback if no expected_query specified
-            for t_name in target_dml_tables:
-                stud_query_res = execute_student_query(f"SELECT COUNT(*) FROM {t_name};", active_db=target_db_clean, nim=nim)
-                cnt = stud_query_res.get("rows", [[0]])[0][0] if stud_query_res.get("rows") else 0
-                if cnt == 0:
-                    return {
-                        "is_correct": False,
-                        "score": 0,
-                        "eval_status": "no_data_affected",
-                        "feedback": f"Tabel '{t_name}' masih kosong setelah kueri dijalankan.",
-                        "student_result": stud_res
-                    }
-            return {
-                "is_correct": True,
-                "score": int(score_weight),
-                "eval_status": "correct",
-                "feedback": f"Sempurna! Data berhasil dimasukkan ke tabel ({', '.join(target_dml_tables)}) (+{score_weight} Poin).",
-                "student_result": stud_res
-            }
-
-
-
-    # 6. Handle DROP TABLE in sandbox
-    if clean_q_upper.startswith("DROP TABLE") and "CREATE TABLE" not in clean_q_upper and "INSERT INTO" not in clean_q_upper:
-        stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-        if not stud_res.get("success"):
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "syntax_error",
-                "feedback": f"Error Sintaks SQL: {stud_res.get('error')}",
-                "student_result": stud_res
-            }
-        return {
-            "is_correct": True,
-            "score": int(score_weight),
-            "eval_status": "correct",
-            "feedback": f"Sempurna! Tabel berhasil dibersihkan dari skema database (+{score_weight} Poin).",
-            "student_result": stud_res
-        }
-
-    # 7. Handle SELECT query evaluation
-    is_sandbox = (target_db_clean == "sandbox_pribadi")
-    eval_nim = nim if is_sandbox else "admin_ref"
-
-    if is_sandbox:
-        # Extract the SELECT query from expected_query to run before tables might be dropped
-        exp_stmts = [s.strip() for s in (expected_query or "").split(";") if s.strip()]
-        exp_select_stmts = [s for s in exp_stmts if s.upper().startswith("SELECT") or ("SELECT" in s.upper() and not s.upper().startswith("DROP"))]
-        if not exp_select_stmts and expected_query and expected_query.strip():
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "wrong_command",
-                "feedback": "Instruksi soal ini bukan merupakan kueri SELECT laporan. Periksa kembali jenis perintah SQL yang diminta pada instruksi soal.",
-                "student_result": None
-            }
-        exp_query_to_run = ";\n".join(exp_select_stmts) if exp_select_stmts else expected_query
-        exp_res = execute_student_query(exp_query_to_run, active_db=target_db_clean, nim=eval_nim)
-        # Also strip any accidental DROP statements from student query during SELECT evaluation to prevent sandbox data loss
-        stud_stmts = [s.strip() for s in submitted_query.split(";") if s.strip()]
-        stud_select_stmts = [s for s in stud_stmts if not s.upper().startswith("DROP")]
-        stud_query_to_run = ";\n".join(stud_select_stmts) if stud_select_stmts else submitted_query
-        stud_res = execute_student_query(stud_query_to_run, active_db=target_db_clean, nim=nim)
-    else:
-        exp_res = execute_student_query(expected_query, active_db=target_db_clean, nim="admin_ref")
-        stud_res = execute_student_query(submitted_query, active_db=target_db_clean, nim=nim)
-
-    if not stud_res.get("success"):
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "syntax_error",
-            "feedback": f"Error Sintaks SQL: {stud_res.get('error')}",
-            "student_result": stud_res
-        }
-
-    if not expected_query or not expected_query.strip():
-        # No reference query provided by lecturer -> award full points if executed successfully
-        return {
-            "is_correct": True,
-            "score": int(score_weight),
-            "eval_status": "correct",
-            "feedback": f"Query berhasil dieksekusi dengan {stud_res.get('row_count', 0)} baris data (+{score_weight} Poin).",
-            "student_result": stud_res
-        }
-
-    if not exp_res.get("success"):
-        err_msg = exp_res.get("error", "")
-        if "does not exist" in err_msg.lower():
-            return {
-                "is_correct": False,
-                "score": 0,
-                "eval_status": "table_not_found",
-                "feedback": "Tabel yang dibutuhkan belum tersedia di skema sandbox Anda. Pastikan telah menyelesaikan soal DDL dan DML sebelumnya.",
-                "student_result": stud_res
-            }
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "reference_error",
-            "feedback": "Terjadi kendala pada validasi soal. Silakan hubungi pengawas ujian.",
-            "student_result": stud_res
-        }
-
-    # Compare Column Counts
-    stud_cols = stud_res.get("columns", [])
-    exp_cols = exp_res.get("columns", [])
-
-    # Guard against 0-column false positives
-    if len(stud_cols) == 0:
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "column_mismatch",
-            "feedback": "Kueri SQL Anda tidak menghasilkan kolom keluaran laporan. Periksa kembali klausa SELECT yang Anda tuliskan.",
-            "student_result": stud_res
-        }
-
-    if len(exp_cols) == 0:
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "reference_error",
-            "feedback": "Kueri acuan soal tidak menghasilkan kolom data laporan. Silakan laporkan kepada pengawas ujian.",
-            "student_result": stud_res
-        }
-
-    if len(stud_cols) != len(exp_cols):
-        fb_col = (
-            f"Jumlah kolom hasil query ({len(stud_cols)} kolom) belum sesuai dengan instruksi soal ({len(exp_cols)} kolom). Periksa kembali kolom pada klausa SELECT Anda."
-            if EXAM_HINT_MODE == "guided"
-            else "Daftar kolom keluaran belum sesuai format laporan yang diminta. Periksa kembali atribut atau ekspresi yang harus ditampilkan pada klausa SELECT."
-        )
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "column_mismatch",
-            "feedback": fb_col,
-            "student_result": stud_res
-        }
-
-    # Compare Column Names
-    stud_cols_norm = [c.lower() for c in stud_cols]
-    exp_cols_norm = [c.lower() for c in exp_cols]
-    if stud_cols_norm != exp_cols_norm:
-        fb_names = (
-            f"Nama atau susunan kolom belum sesuai spesifikasi soal. Kolom kueri Anda: [{', '.join(stud_cols)}]. Periksa kembali alias (AS) atau urutan kolom pada klausa SELECT."
-            if EXAM_HINT_MODE == "guided"
-            else "Label penamaan kolom (alias) atau urutan penyajian atribut laporan belum sesuai spesifikasi acuan. Periksa kembali klausa SELECT dan alias (AS) yang digunakan."
-        )
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "column_mismatch",
-            "feedback": fb_names,
-            "student_result": stud_res
-        }
-
-    # Compare Row Counts
-    stud_rows = stud_res.get("rows", [])
-    exp_rows = exp_res.get("rows", [])
-    if len(stud_rows) != len(exp_rows):
-        fb_rows = (
-            f"Jumlah baris data hasil query ({len(stud_rows)} baris) belum sesuai. Periksa kembali filter kondisi WHERE, GROUP BY, atau relasi JOIN Anda."
-            if EXAM_HINT_MODE == "guided"
-            else "Keluaran data yang dihasilkan belum memenuhi kriteria laporan. Periksa kembali logika filter kondisi WHERE, pengelompokan GROUP BY, atau relasi JOIN Anda."
-        )
-        return {
-            "is_correct": False,
-            "score": 0,
-            "eval_status": "row_count_mismatch",
-            "feedback": fb_rows,
-            "student_result": stud_res
-        }
-
-
-
-    # Compare Cell Values (Order-Insensitive unless ORDER BY specified)
-
-    norm_stud_rows = [[_normalize_cell_value(cell) for cell in row] for row in stud_rows]
-
-    norm_exp_rows = [[_normalize_cell_value(cell) for cell in row] for row in exp_rows]
-
-
-
-    has_order_by = "ORDER BY" in expected_query.upper()
-
-
-
-    if has_order_by:
-
-        if norm_stud_rows != norm_exp_rows:
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "wrong_order",
-
-                "feedback": "Data hasil belum terurut dengan benar sesuai instruksi soal. Periksa kembali klausa ORDER BY Anda (ASC/DESC).",
-
-                "student_result": stud_res
-
-            }
-
-    else:
-
-        def row_sort_key(r):
-
-            return tuple(str(x) for x in r)
-
-        sorted_stud = sorted(norm_stud_rows, key=row_sort_key)
-
-        sorted_exp = sorted(norm_exp_rows, key=row_sort_key)
-
-        if sorted_stud != sorted_exp:
-
-            return {
-
-                "is_correct": False,
-
-                "score": 0,
-
-                "eval_status": "wrong_data",
-
-                "feedback": "Data yang dihasilkan belum sesuai dengan spesifikasi soal. Periksa kembali filter baris, agregasi, atau perhitungan kalkulasi kueri Anda.",
-
-                "student_result": stud_res
-
-            }
-
-
-
-    return {
-
-        "is_correct": True,
-
-        "score": int(score_weight),
-
-        "eval_status": "correct",
-
-        "feedback": f"Sempurna! Output kueri Anda 100% sesuai dengan spesifikasi soal (+{score_weight} Poin).",
-
-        "student_result": stud_res
-
-    }
-
-
-
-
-
-def save_submission(
-
-    user_id: int,
-
-    question_id: int,
-
-    submitted_query: str,
-
-    is_correct: int = 0,
-
-    score: int = 0,
-
-    eval_status: str = "pending",
-
-    feedback: str = ""
-
-) -> Dict[str, Any]:
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        cur = conn.cursor()
-
-        # Check existing submission to prevent score regression (Best Score Wins policy)
-        cur.execute(
-            "SELECT score, is_correct, submitted_query, eval_status, feedback FROM submissions WHERE user_id = ? AND question_id = ?;",
-            (user_id, question_id)
-        )
-        existing = cur.fetchone()
-
-        prev_score = int(existing["score"]) if existing and existing["score"] is not None else 0
-        prev_is_correct = int(existing["is_correct"]) if existing and existing["is_correct"] is not None else 0
-        score_retained = False
-
-        if existing and prev_score > score:
-            # Submisi baru menghasilkan nilai lebih rendah -> Pertahankan skor & kueri terbaik sebelumnya
-            effective_score = prev_score
-            effective_is_correct = prev_is_correct
-            effective_query = existing["submitted_query"] or submitted_query
-            effective_eval_status = existing["eval_status"] or eval_status
-            effective_feedback = existing["feedback"] or feedback
-            score_retained = True
-            log_desc = (
-                f"Jawaban Soal ID {question_id} disubmit ulang (Hasil evaluasi baru: {score} Poin, "
-                f"Skor tertinggi {effective_score} Poin tetap dipertahankan)"
-            )
-        else:
-            # Submisi baru bernilai lebih tinggi atau sama (atau submisi pertama kali)
-            effective_score = score
-            effective_is_correct = is_correct
-            effective_query = submitted_query
-            effective_eval_status = eval_status
-            effective_feedback = feedback
-            log_desc = f"Jawaban untuk Soal ID {question_id} disubmit (Nilai: {score}, Benar: {bool(is_correct)})"
-
-        cur.execute(
-            """
-            INSERT INTO submissions (user_id, question_id, submitted_query, submitted_at, status, is_correct, score, eval_status, feedback)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'submitted', ?, ?, ?, ?)
-            ON CONFLICT(user_id, question_id) DO UPDATE SET
-                submitted_query = ?,
-                submitted_at = CURRENT_TIMESTAMP,
-                status = 'submitted',
-                is_correct = ?,
-                score = ?,
-                eval_status = ?,
-                feedback = ?;
-            """,
-            (
-                user_id, question_id, effective_query, effective_is_correct, effective_score, effective_eval_status, effective_feedback,
-                effective_query, effective_is_correct, effective_score, effective_eval_status, effective_feedback
-            )
-        )
-
-        cur.execute(
-            """
-            INSERT INTO exam_logs (user_id, action_type, details)
-            VALUES (?, 'submit', ?);
-            """,
-            (user_id, log_desc)
-        )
-
-    conn.close()
-
-    return {
-        "status": "success",
-        "message": "Jawaban berhasil disimpan",
-        "score": effective_score,
-        "is_correct": bool(effective_is_correct),
-        "score_retained": score_retained,
-        "previous_score": prev_score,
-        "new_score": score,
-        "retained_query": effective_query
-    }
-
+    from grading_results import canonical
+    return canonical(val)
+
+
+def evaluate_sql_submission(submitted_query: str, expected_query: Optional[str], score_weight: int = 10,
+                            target_db: str = DEFAULT_EXAM_DB, active_db: str = DEFAULT_EXAM_DB,
+                            nim: Optional[str] = None, grading_policy=None, setup_query="", question_id=None):
+    from grading_engine import evaluate
+    return evaluate(submitted_query, expected_query, score_weight, target_db, active_db, nim,
+                    grading_policy, setup_query, question_id)
+
+
+def save_submission(user_id: int, question_id: int, submitted_query: str, is_correct=0,
+                    score=0, eval_status="pending", feedback="", session_context=None, graded=True, active_database=None):
+    with SQLITE_COMMIT_GUARD.get()(), closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        question = conn.execute("SELECT * FROM questions WHERE id=?", (question_id,)).fetchone()
+        if question is None:
+            raise StudentAccessError("Soal tidak ditemukan.", 404, "question_changed")
+        if session_context:
+            user = require_student_access(session_context["nim"], session_context["session_token"],
+                session_context["ip_address"], active=True, category=True,
+                revision=session_context["exam_revision"], conn=conn)
+            if user["id"] != user_id or question["category"] != user["selected_category"]:
+                raise StudentAccessError("Soal tidak sesuai paket sesi Anda.", 403, "package_changed")
+            if session_context.get("question_revision", question["question_revision"]) != question["question_revision"]:
+                raise StudentAccessError("Soal berubah selama penilaian. Kirim ulang setelah memuat soal terbaru.", 403, "question_changed")
+        existing = conn.execute("SELECT * FROM submissions WHERE user_id=? AND question_id=?", (user_id, question_id)).fetchone()
+        current = dict(existing) if existing else None
+        previous_score = int(current["score"] or 0) if current else 0
+        attempt_score = int(score or 0) if graded else None
+        attempt_correct = int(bool(is_correct)) if graded else None
+        attempt = conn.execute("""INSERT INTO submission_attempts
+            (user_id,question_id,submitted_query,graded,is_correct,score,eval_status,feedback,question_revision)
+            VALUES (?,?,?,?,?,?,?,?,?)""", (user_id, question_id, submitted_query, int(graded), attempt_correct,
+            attempt_score, eval_status, feedback, question["question_revision"]))
+        retained = bool(current and (not graded or (previous_score > attempt_score or (previous_score == attempt_score and bool(current["is_correct"]) and not attempt_correct))))
+        if graded and not retained:
+            conn.execute("""INSERT INTO submissions
+                (user_id,question_id,submitted_query,is_correct,score,eval_status,feedback,question_revision)
+                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,question_id) DO UPDATE SET
+                submitted_query=excluded.submitted_query,submitted_at=CURRENT_TIMESTAMP,
+                is_correct=excluded.is_correct,score=excluded.score,eval_status=excluded.eval_status,
+                feedback=excluded.feedback,question_revision=excluded.question_revision""",
+                (user_id, question_id, submitted_query, attempt_correct, attempt_score, eval_status, feedback, question["question_revision"]))
+            current = dict(conn.execute("SELECT * FROM submissions WHERE user_id=? AND question_id=?", (user_id, question_id)).fetchone())
+        latest = dict(conn.execute("SELECT * FROM submission_attempts WHERE id=?", (attempt.lastrowid,)).fetchone())
+        import grading_queue
+        queue_status = grading_queue.enqueue_pending(conn,latest,dict(question),active_database)
+        if queue_status:
+            latest["grading_job"] = {"status":queue_status}
+
+        conn.execute("INSERT INTO exam_logs (user_id,action_type,details) VALUES (?,'submit',?)",
+                     (user_id, f"Percobaan {attempt.lastrowid}, soal {question_id}, status {eval_status}; dinilai={bool(graded)}" + (f". Skor tertinggi {previous_score} Poin tetap dipertahankan" if retained else "")))
+        return {"status": "success", "message": "Percobaan jawaban disimpan", "graded": graded,
+                "score": current["score"] if current else None, "is_correct": bool(current["is_correct"]) if current else None,
+                "score_retained": retained, "previous_score": previous_score, "new_score": attempt_score,
+                "retained_query": current["submitted_query"] if current else "", "queue_status":queue_status,
+                "best_submission": current, "latest_attempt": latest, "attempt_id": latest["id"]}
 
 
 def get_student_submissions(user_id: int) -> Dict[int, Dict[str, Any]]:
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM submissions WHERE user_id = ?;", (user_id,))
-
-    rows = cur.fetchall()
-
-    conn.close()
-
-    return {r["question_id"]: dict(r) for r in rows}
-
+    import grading_queue
+    with closing(get_sqlite_conn()) as conn:
+        result = {row["question_id"]: dict(row) for row in conn.execute("SELECT * FROM submissions WHERE user_id=?", (user_id,))}
+        latest = conn.execute("""SELECT a.* FROM submission_attempts a WHERE a.user_id=? AND a.id IN
+            (SELECT MAX(id) FROM submission_attempts WHERE user_id=? GROUP BY question_id)""", (user_id, user_id)).fetchall()
+        for row in latest:
+            result.setdefault(row["question_id"], {"submitted_query": "", "score": None, "is_correct": None})["latest_attempt"] = grading_queue.effective_attempt(conn,row)
+        return result
 
 
 def get_all_students_progress() -> List[Dict[str, Any]]:
@@ -3145,6 +2047,19 @@ def get_all_students_progress() -> List[Dict[str, Any]]:
 
 
 
+def log_student_event(context, action_type, details):
+    allowed = {"paste_attempt","devtools_attempt","blur_tab","focus_tab","exit_fullscreen"}
+    if action_type not in allowed or len(details) > 1000:
+        raise ValueError("Peristiwa mahasiswa tidak valid.")
+    clean_details = "".join(char for char in details if ord(char)>=32 or char in "\n\t")
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = require_student_access(context["nim"], context["session_token"], context["ip_address"], active=True,
+                                      category=True, revision=context["exam_revision"], conn=conn)
+        conn.execute("INSERT INTO exam_logs(user_id,action_type,details) VALUES(?,?,?)",
+                     (user["id"],action_type,"Laporan klien: " + clean_details))
+
+
 def log_exam_event(user_id: Optional[int], action_type: str, details: str):
 
     conn = get_sqlite_conn()
@@ -3202,6 +2117,14 @@ def get_recent_exam_logs(limit: int = 50, offset: int = 0) -> Tuple[List[Dict[st
 
 
 
+def safe_csv_writer(output):
+    writer = csv.writer(output)
+    class Writer:
+        def writerow(self, values):
+            writer.writerow([("'" + value if isinstance(value, str) and value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) else value) for value in values])
+    return Writer()
+
+
 def export_all_submissions_csv() -> str:
     conn = get_sqlite_conn()
     cur = conn.cursor()
@@ -3228,7 +2151,7 @@ def export_all_submissions_csv() -> str:
     conn.close()
 
     output = io.StringIO()
-    writer = csv.writer(output)
+    writer = safe_csv_writer(output)
     writer.writerow([
         "NIM", "Nama Mahasiswa", "IP Address",
         "Nomor Soal", "Judul Soal", "Bobot Nilai",
@@ -3338,11 +2261,14 @@ def export_submissions_zip_bytes() -> bytes:
                 file_content.append(f"{clean_ans}\n")
 
             sql_data = "\n".join(file_content)
-            zip_file.writestr(f"{nim}_{name}.sql", sql_data)
+            safe_nim = re.sub(r'[^a-zA-Z0-9_-]', '_', nim)
+            if safe_nim != nim:
+                safe_nim += f"_{user_id}"
+            zip_file.writestr(f"{safe_nim}_{name}.sql", sql_data)
 
         # Generate rekap_nilai_ujian.csv inside the ZIP file
         summary_output = io.StringIO()
-        csv_writer = csv.writer(summary_output)
+        csv_writer = safe_csv_writer(summary_output)
         csv_writer.writerow([
             "NIM", "Nama Mahasiswa", "IP Address", "Paket Soal",
             "Total Skor", "Skor Maksimal", "Soal Benar", "Total Soal", "Persentase Nilai (%)"
@@ -3406,7 +2332,7 @@ def export_all_logs_csv() -> str:
 
     output = io.StringIO()
 
-    writer = csv.writer(output)
+    writer = safe_csv_writer(output)
 
     writer.writerow([
 
@@ -3508,7 +2434,7 @@ def export_tab_switches_csv() -> str:
 
     output = io.StringIO()
 
-    writer = csv.writer(output)
+    writer = safe_csv_writer(output)
 
     writer.writerow([
 
@@ -3678,242 +2604,40 @@ def export_tab_switches_csv() -> str:
 
 
 
+_HARDENED_DATABASES = set()
+
+
 def init_postgres_db() -> Tuple[bool, str]:
-
-    """
-
-    Menginisialisasi PostgreSQL secara otomatis pada run pertama kali:
-
-    1. Mengecek koneksi ke server PostgreSQL.
-
-    2. Membuat database 'classicmodels' jika belum ada.
-
-    3. Membuat role 'student_role' dengan izin read-only jika belum ada.
-
-    4. Mengisi dataset awal dari data/classicmodels.sql jika database masih kosong.
-
-    """
-
-    admin_pass = PG_ADMIN_PASS or None
-
-
-
-    # 1. Coba koneksi ke PostgreSQL
-
-    conn = None
-
+    if PG_ADMIN_USER == PG_STUDENT_USER or DEFAULT_EXAM_DB not in ALLOWED_MASTER_DBS:
+        return False, "Konfigurasi role/database ujian tidak aman atau tidak didukung."
     try:
-
-        conn = psycopg2.connect(
-
-            dbname=PG_DB,
-
-            user=PG_ADMIN_USER,
-
-            password=admin_pass,
-
-            host=PG_HOST,
-
-            port=PG_PORT
-
-        )
-
-    except psycopg2.OperationalError as e:
-
-        err_str = str(e)
-
-        # Jika database belum ada, buat database secara otomatis
-
-        if "does not exist" in err_str or "tidak ada" in err_str:
-
-            fallback_conn = None
-
-            for default_db in ("postgres", "template1"):
-
-                try:
-
-                    fallback_conn = psycopg2.connect(
-
-                        dbname=default_db,
-
-                        user=PG_ADMIN_USER,
-
-                        password=admin_pass,
-
-                        host=PG_HOST,
-
-                        port=PG_PORT
-
-                    )
-
-                    break
-
-                except Exception:
-
-                    continue
-
-
-
-            if not fallback_conn:
-
-                return False, f"PostgreSQL berjalan, tetapi database '{PG_DB}' belum ada dan gagal terhubung ke database default (postgres/template1) untuk membuatnya: {err_str}"
-
-
-
-            try:
-
-                fallback_conn.autocommit = True
-
-                cur = fallback_conn.cursor()
-
-                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(PG_DB)))
-
-                cur.close()
-
-                fallback_conn.close()
-
-
-
-                # Hubungkan ke database yang baru dibuat
-
-                conn = psycopg2.connect(
-
-                    dbname=PG_DB,
-
-                    user=PG_ADMIN_USER,
-
-                    password=admin_pass,
-
-                    host=PG_HOST,
-
-                    port=PG_PORT
-
-                )
-
-            except Exception as create_err:
-
-                return False, f"Gagal membuat database '{PG_DB}': {create_err}"
-
-        else:
-
-            return False, f"PostgreSQL belum dapat diakses ({PG_HOST}:{PG_PORT}): {err_str}"
-
-    except Exception as e:
-
-        return False, f"Gagal koneksi PostgreSQL: {e}"
-
-
-
-    # 2. Setup student_role dan muat dataset jika database masih kosong
-
-    try:
-
-        conn.autocommit = True
-
-        cur = conn.cursor()
-
-
-
-        # Buat atau sinkronkan student_role
-
-        cur.execute(f"""
-
-        DO $$
-
-        BEGIN
-
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{PG_STUDENT_USER}') THEN
-
-                CREATE ROLE {PG_STUDENT_USER} WITH LOGIN PASSWORD '{PG_STUDENT_PASS}';
-
-            ELSE
-
-                ALTER ROLE {PG_STUDENT_USER} WITH LOGIN PASSWORD '{PG_STUDENT_PASS}';
-
-            END IF;
-
-        END
-
-        $$;
-
-        """)
-
-
-
-        # Pastikan student_role memiliki hak akses CONNECT, USAGE, dan SELECT pada semua database master
-
-        for m_db in sorted(list(ALLOWED_MASTER_DBS)):
-
-            try:
-
-                m_conn = get_pg_admin_connection(dbname=m_db)
-
-                m_conn.autocommit = True
-
-                m_cur = m_conn.cursor()
-
-                m_cur.execute(f"GRANT CONNECT ON DATABASE {sql.Identifier(m_db).as_string(m_conn)} TO {PG_STUDENT_USER};")
-
-                grant_student_permissions(m_cur)
-
-                m_cur.close()
-
-                m_conn.close()
-
-            except Exception as m_err:
-
-                print(f"[INIT PG] Sinkronisasi izin database '{m_db}' dilewati: {m_err}")
-
-
-
-        # Periksa apakah sudah ada tabel di user schemas
-
-        cur.execute("""
-
-            SELECT COUNT(*)
-
-            FROM information_schema.tables
-
-            WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-
-              AND table_schema NOT LIKE 'pg_%%'
-
-              AND table_type = 'BASE TABLE';
-
-        """)
-
-        table_count = cur.fetchone()[0]
-
-        cur.close()
-
-        conn.close()
-
-
-
-        # Jika database masih baru/kosong, isi dataset awal secara otomatis
-
-        if table_count == 0:
-
-            ok, msg = reset_target_database(PG_DB)
-
-            if not ok:
-
-                return False, f"Database '{PG_DB}' dibuat, namun gagal memuat dataset: {msg}"
-
-            return True, f"Database '{PG_DB}', role '{PG_STUDENT_USER}', dan dataset master berhasil diinisialisasi otomatis."
-
-
-
-        return True, f"Database '{PG_DB}' dan role '{PG_STUDENT_USER}' siap digunakan ({table_count} tabel aktif)."
-
-    except Exception as e:
-
-        if conn and not conn.closed:
-
-            conn.close()
-
-        return False, f"Gagal setup PostgreSQL: {e}"
-
+        close_pg_pools()
+        with closing(get_pg_admin_connection("postgres")) as admin:
+            admin.autocommit = True
+            with admin.cursor() as cursor:
+                sandbox_roles.harden_role(cursor, PG_STUDENT_USER, PG_STUDENT_PASS)
+                for dbname in sorted(ALLOWED_MASTER_DBS):
+                    cursor.execute("SELECT 1 FROM pg_database WHERE datname=%s", (dbname,))
+                    if not cursor.fetchone():
+                        cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+        for dbname in sorted(ALLOWED_MASTER_DBS):
+            with closing(get_pg_admin_connection(dbname)) as conn, conn:
+                with conn.cursor() as cursor:
+                    grant_student_permissions(cursor)
+                    cursor.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
+                    empty = cursor.fetchone()[0] == 0
+            if empty:
+                # Rebuilding missing master data is a new dataset, not a transparent restart.
+                if get_exam_state() == "active":
+                    set_exam_state("waiting")
+                ok, message = reset_target_database(dbname)
+                if not ok:
+                    raise RuntimeError(message)
+            _HARDENED_DATABASES.add(dbname)
+        return True, "Database master read-only dan role sandbox terisolasi siap digunakan."
+    except Exception as error:
+        _HARDENED_DATABASES.clear()
+        return False, f"Gagal menyiapkan PostgreSQL dengan aman: {sanitize_db_error_message(error)}"
 
 
 def execute_pg_dump(cursor, sql_text: str):
@@ -4019,36 +2743,21 @@ def execute_pg_dump(cursor, sql_text: str):
 
 
 def grant_student_permissions(cursor):
-    """
-    Grants USAGE, SELECT on all tables and sequences, and default privileges
-    in public schema and all user schemas to PG_STUDENT_USER, revoking CREATE.
-    """
-    cursor.execute(f"""
-        DO $$
-        DECLARE
-            sch text;
-        BEGIN
-            FOR sch IN
-                SELECT schema_name
-                FROM information_schema.schemata
-                WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-                  AND schema_name NOT LIKE 'pg_%'
-                  AND schema_name NOT LIKE 'sandbox_%'
-            LOOP
-                EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
-                EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
-                EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I;', sch, '{PG_STUDENT_USER}');
-                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT ON TABLES TO %I;', sch, '{PG_STUDENT_USER}');
-                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I;', sch, '{PG_STUDENT_USER}');
-                EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM PUBLIC;', sch);
-                EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I;', sch, '{PG_STUDENT_USER}');
-            END LOOP;
-        END
-        $$;
-    """)
+    sandbox_roles.harden_database(cursor)
 
 
 def reset_target_database(target_db: str = DEFAULT_EXAM_DB, custom_sql_text: Optional[str] = None) -> Tuple[bool, str]:
+    import grading_queue
+    target_db = (target_db or DEFAULT_EXAM_DB).strip()
+    if target_db == "sandbox_pribadi":
+        target_db = DEFAULT_EXAM_DB
+    if target_db.lower() not in ALLOWED_MASTER_DBS:
+        return False, "Target database tidak valid."
+    with grading_queue.dataset_maintenance():
+        return _reset_target_database_impl(target_db, custom_sql_text)
+
+
+def _reset_target_database_impl(target_db: str = DEFAULT_EXAM_DB, custom_sql_text: Optional[str] = None) -> Tuple[bool, str]:
     """
     Resets the target PostgreSQL database to a clean initial state or executes a custom SQL dump.
     Supports COPY ... FROM stdin, dollar quotes, schema cleanup, and student_role permissions.
@@ -4091,7 +2800,7 @@ def reset_target_database(target_db: str = DEFAULT_EXAM_DB, custom_sql_text: Opt
         if is_data_only:
             # Data-only dump: DO NOT drop schema! Preserve existing tables.
             cur.execute("CREATE SCHEMA IF NOT EXISTS public;")
-            cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+            cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {};").format(sql.Identifier(PG_ADMIN_USER)))
             grant_student_permissions(cur)
 
             # Check if tables already exist in public schema
@@ -4120,7 +2829,7 @@ def reset_target_database(target_db: str = DEFAULT_EXAM_DB, custom_sql_text: Opt
 
             cur.execute("DROP SCHEMA IF EXISTS public CASCADE;")
             cur.execute("CREATE SCHEMA public;")
-            cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+            cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {};").format(sql.Identifier(PG_ADMIN_USER)))
             cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC;")
             cur.execute("SET search_path = public;")
 
@@ -4177,6 +2886,14 @@ def reset_pagila_database() -> Tuple[bool, str]:
 
 
 def empty_target_database(target_db: str = DEFAULT_EXAM_DB) -> Tuple[bool, str]:
+    import grading_queue
+    if (target_db or DEFAULT_EXAM_DB).strip() not in ALLOWED_STUDENT_DBS:
+        return False, "Target database tidak valid."
+    with grading_queue.dataset_maintenance():
+        return _empty_target_database_impl(target_db)
+
+
+def _empty_target_database_impl(target_db: str = DEFAULT_EXAM_DB) -> Tuple[bool, str]:
     """
     Clears all tables, views, sequences, and types in the target PostgreSQL database (0 tables).
     Prepares a clean, empty public schema with student_role permissions without loading default datasets.
@@ -4206,7 +2923,7 @@ def empty_target_database(target_db: str = DEFAULT_EXAM_DB) -> Tuple[bool, str]:
 
         cur.execute("DROP SCHEMA IF EXISTS public CASCADE;")
         cur.execute("CREATE SCHEMA public;")
-        cur.execute("GRANT ALL ON SCHEMA public TO postgres;")
+        cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {};").format(sql.Identifier(PG_ADMIN_USER)))
         cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC;")
         cur.execute("SET search_path = public;")
 
@@ -4246,7 +2963,8 @@ def get_pg_admin_connection(dbname: str = DEFAULT_EXAM_DB):
 
         host=PG_HOST,
 
-        port=PG_PORT
+        port=PG_PORT,
+        connect_timeout=5
 
     )
 
@@ -4257,10 +2975,6 @@ def get_pg_admin_connection(dbname: str = DEFAULT_EXAM_DB):
 # Multi-Database pools dictionary: { "pagila": pool, "classicmodels": pool }
 
 _PG_POOL_LOCK = threading.Lock()
-
-_SANDBOX_INIT_LOCK = threading.Lock()
-
-_INITIALIZED_SANDBOX_SCHEMAS: Set[str] = set()
 
 
 
@@ -4326,8 +3040,8 @@ def get_pool_stats() -> Dict[str, Any]:
 def get_pg_student_pool_for_db(dbname: str = DEFAULT_EXAM_DB) -> pool.ThreadedConnectionPool:
     global PG_DB_POOLS
     target_dbname = DEFAULT_EXAM_DB if dbname == "sandbox_pribadi" else dbname
-    if target_dbname not in ["pagila", "classicmodels", "praktikum_db"]:
-        target_dbname = DEFAULT_EXAM_DB
+    if target_dbname not in _HARDENED_DATABASES:
+        raise RuntimeError("Database ujian belum selesai diamankan. Hubungi pengawas.")
 
     if target_dbname not in PG_DB_POOLS or PG_DB_POOLS[target_dbname] is None or PG_DB_POOLS[target_dbname].closed:
         with _PG_POOL_LOCK:
@@ -4339,7 +3053,8 @@ def get_pg_student_pool_for_db(dbname: str = DEFAULT_EXAM_DB) -> pool.ThreadedCo
                     user=PG_STUDENT_USER,
                     password=PG_STUDENT_PASS or None,
                     host=PG_HOST,
-                    port=PG_PORT
+                    port=PG_PORT,
+                    connect_timeout=5
                 )
     return PG_DB_POOLS[target_dbname]
 
@@ -4372,253 +3087,62 @@ def close_pg_pools():
     PG_DB_POOLS.clear()
 
     PG_STUDENT_POOL = None
+    sandbox_roles.clear_cache()
 
 
 
 def get_pg_student_connection(dbname: str = DEFAULT_EXAM_DB):
-
-    """Returns a sandboxed student connection to PostgreSQL for the specified database."""
-
-    target_dbname = DEFAULT_EXAM_DB if dbname == "sandbox_pribadi" else dbname
-
-    try:
-
-        conn = psycopg2.connect(
-
-            dbname=target_dbname,
-
-            user=PG_STUDENT_USER,
-
-            password=PG_STUDENT_PASS or None,
-
-            host=PG_HOST,
-
-            port=PG_PORT
-
-        )
-
-    except Exception:
-
-        conn = get_pg_admin_connection(target_dbname)
-
-        conn.autocommit = False
-
-        cur = conn.cursor()
-
-        cur.execute("SET ROLE student_role;")
-
-        cur.close()
-
-    return conn
-
+    target = DEFAULT_EXAM_DB if dbname == "sandbox_pribadi" else dbname
+    if target not in _HARDENED_DATABASES:
+        raise RuntimeError("Database ujian belum selesai diamankan. Hubungi pengawas.")
+    return psycopg2.connect(dbname=target, user=PG_STUDENT_USER, password=PG_STUDENT_PASS or None,
+                            host=PG_HOST, port=PG_PORT, connect_timeout=5)
 
 
 def get_clean_student_schema_name(nim: Optional[str]) -> str:
-
-    """Sanitizes student NIM to form a safe schema name (e.g. sandbox_220101001)."""
-
-    if not nim:
-
-        return "sandbox_default"
-
-    clean_nim = re.sub(r'[^a-zA-Z0-9_]', '', str(nim).strip()).lower()
-
-    return f"sandbox_{clean_nim}" if clean_nim else "sandbox_default"
-
+    return sandbox_roles.identity(nim)[0]
 
 
 def init_student_sandbox_schema(nim: Optional[str]) -> str:
-
-    """
-
-    Creates a dedicated sandbox schema for a student if not already present.
-
-    Grants USAGE and CREATE privileges to student_role inside this schema only.
-
-    Uses memory cache and thread lock to prevent redundant DDL executions and connection exhaustion.
-
-    """
-
-    schema_name = get_clean_student_schema_name(nim)
-
-    if schema_name in _INITIALIZED_SANDBOX_SCHEMAS:
-
-        return schema_name
-
-
-
-    with _SANDBOX_INIT_LOCK:
-
-        if schema_name in _INITIALIZED_SANDBOX_SCHEMAS:
-
-            return schema_name
-
-        try:
-
-            conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
-            conn.autocommit = True
-
-            cur = conn.cursor()
-
-            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {};").format(sql.Identifier(schema_name)))
-
-            cur.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO student_role;").format(sql.Identifier(schema_name)))
-
-            cur.execute(sql.SQL("GRANT ALL ON ALL TABLES IN SCHEMA {} TO student_role;").format(sql.Identifier(schema_name)))
-
-            cur.execute(sql.SQL("GRANT ALL ON ALL SEQUENCES IN SCHEMA {} TO student_role;").format(sql.Identifier(schema_name)))
-
-            cur.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT ALL ON TABLES TO student_role;").format(sql.Identifier(schema_name)))
-
-            cur.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT ALL ON SEQUENCES TO student_role;").format(sql.Identifier(schema_name)))
-
-            cur.close()
-
-            conn.close()
-
-            _INITIALIZED_SANDBOX_SCHEMAS.add(schema_name)
-
-        except Exception as e:
-
-            print(f"Error initializing student sandbox schema {schema_name}: {e}")
-
-    return schema_name
-
+    if DEFAULT_EXAM_DB not in _HARDENED_DATABASES:
+        raise RuntimeError("Database ujian belum selesai diamankan. Hubungi pengawas.")
+    return sandbox_roles.ensure_workspace(nim)[0]
 
 
 def cleanup_student_sandbox_schema(nim: Optional[str]) -> bool:
-
-    """Drops the student's sandbox schema and all contained dummy tables."""
-
-    schema_name = get_clean_student_schema_name(nim)
-
-    with _SANDBOX_INIT_LOCK:
-
-        _INITIALIZED_SANDBOX_SCHEMAS.discard(schema_name)
-
+    schema, role = sandbox_roles.identity(nim)
     try:
-
-        conn = get_pg_admin_connection(dbname=DEFAULT_EXAM_DB)
-
-        conn.autocommit = True
-
-        cur = conn.cursor()
-
-        cur.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE;").format(sql.Identifier(schema_name)))
-
-        cur.close()
-
-        conn.close()
-
+        sandbox_roles.forget_workspace(nim)
+        with closing(get_pg_admin_connection()) as conn, conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SET LOCAL statement_timeout = 5000")
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("sqlexam:database-acl:" + DEFAULT_EXAM_DB,))
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("sqlexam:workspace:" + schema,))
+                legacy = "sandbox_" + re.sub(r"[^a-zA-Z0-9_]", "", str(nim).strip()).lower()
+                legacy = legacy[:63]
+                cursor.execute("SELECT 1 FROM pg_namespace WHERE nspname=%s", (legacy,))
+                if legacy != schema and cursor.fetchone():
+                    with closing(get_sqlite_conn()) as sqlite:
+                        owners = [row[0] for row in sqlite.execute("SELECT nim FROM users")
+                                  if ("sandbox_" + re.sub(r"[^a-zA-Z0-9_]", "", row[0]).lower())[:63] == legacy]
+                    if len(owners) != 1 or owners[0].lower() != str(nim).strip().lower():
+                        raise RuntimeError("Sandbox lama ambigu; cleanup dibatalkan tanpa menghapus data.")
+                    cursor.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(legacy)))
+                cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+                cursor.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+                if cursor.fetchone():
+                    cursor.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM {}").format(sql.Identifier(DEFAULT_EXAM_DB), sql.Identifier(role)))
+                    cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
         return True
-
-    except Exception as e:
-
-        print(f"Error dropping student sandbox schema {schema_name}: {e}")
-
+    except Exception as error:
+        print(f"Sandbox cleanup failed: {sanitize_db_error_message(error)}")
         return False
 
 
-
 def split_sql_statements(sql_text: str) -> List[str]:
-    """Splits a multi-statement SQL script into individual statements, ignoring semicolons inside quotes, comments, and dollar-quoted blocks ($$ or $tag$)."""
-    statements = []
-    current = []
-    in_single_quote = False
-    in_double_quote = False
-    in_line_comment = False
-    in_block_comment = False
-    dollar_tag = None
-    i = 0
-    n = len(sql_text)
-
-    while i < n:
-        c = sql_text[i]
-        next_c = sql_text[i + 1] if i + 1 < n else ''
-
-        # If inside a dollar-quoted block, skip until matching closing tag
-        if dollar_tag is not None:
-            if sql_text.startswith(dollar_tag, i):
-                current.append(dollar_tag)
-                i += len(dollar_tag)
-                dollar_tag = None
-                continue
-            current.append(c)
-            i += 1
-            continue
-
-        # Check comments
-        if not in_single_quote and not in_double_quote:
-            if not in_block_comment and c == '-' and next_c == '-':
-                in_line_comment = True
-                i += 2
-                continue
-            if in_line_comment:
-                if c == '\n':
-                    in_line_comment = False
-                i += 1
-                continue
-            if not in_line_comment and c == '/' and next_c == '*':
-                in_block_comment = True
-                i += 2
-                continue
-            if in_block_comment:
-                if c == '*' and next_c == '/':
-                    in_block_comment = False
-                    i += 2
-                    continue
-                i += 1
-                continue
-
-            # Check dollar quote start: $tag$ or $$
-            if c == '$':
-                m = re.match(r'^\$[A-Za-z0-9_]*\$', sql_text[i:])
-                if m:
-                    dollar_tag = m.group(0)
-                    current.append(dollar_tag)
-                    i += len(dollar_tag)
-                    continue
-
-        # Check quotes
-        if c == "'" and not in_double_quote and not in_line_comment and not in_block_comment:
-            if in_single_quote and next_c == "'":
-                current.append("''")
-                i += 2
-                continue
-            in_single_quote = not in_single_quote
-            current.append(c)
-            i += 1
-            continue
-        elif c == '"' and not in_single_quote and not in_line_comment and not in_block_comment:
-            in_double_quote = not in_double_quote
-            current.append(c)
-            i += 1
-            continue
-
-        # Semicolon outside quotes/comments/dollar quotes
-        if c == ';' and not in_single_quote and not in_double_quote and not in_line_comment and not in_block_comment and dollar_tag is None:
-            stmt = "".join(current).strip()
-            if stmt:
-                statements.append(stmt)
-            current = []
-            i += 1
-            continue
-
-        current.append(c)
-        i += 1
-
-    last_stmt = "".join(current).strip()
-    if last_stmt:
-        statements.append(last_stmt)
-    return statements
+    return split_statements(sql_text)
 
 
-
-
-# ==============================================================================
-# P0 Security Hardening Constants & Helpers
-# ==============================================================================
 ALLOWED_MASTER_DBS = {"pagila", "classicmodels"}
 ALLOWED_STUDENT_DBS = {"pagila", "classicmodels", "sandbox_pribadi"}
 MAX_STUDENT_QUERY_LENGTH = 10000
@@ -4644,630 +3168,18 @@ def sanitize_db_error_message(err_obj: Any) -> str:
     return clean.strip()
 
 def check_dangerous_sql(query_text: str, is_sandbox_student: bool = False) -> Optional[str]:
-
-    """Inspects query text for prohibited operations."""
-
-    cleaned = re.sub(r'--.*?$|/\*.*?\*/', '', query_text, flags=re.MULTILINE)
-
-
-
-    if is_sandbox_student:
-
-        # In student sandbox mode (Level Easy), student is allowed to CREATE DATABASE (emulated), CREATE TABLE, INSERT, DROP TABLE, DROP DATABASE (emulated)
-
-        forbidden_patterns = [
-
-            r'\bDROP\s+DATABASE\s+(postgres|pagila|classicmodels|praktikum_db|template\d+)\b',
-
-            r'\bDROP\s+(SCHEMA|ROLE|USER)\b',
-
-            r'\bALTER\s+(ROLE|USER|DATABASE|SYSTEM)\b',
-
-            r'\bTRUNCATE\s+(SCHEMA|DATABASE)\b',
-
-            r'\bGRANT\b',
-
-            r'\bREVOKE\b',
-
-            r'\bCREATE\s+(ROLE|USER|EXTENSION|SCHEMA)\b',
-
-            r'\bCOPY\b',
-
-            r'\bVACUUM\b',
-
-            r'\bpg_read_file\b',
-
-            r'\bpg_write_file\b',
-
-            r'\blo_import\b',
-
-            r'\blo_export\b',
-
-            r'\bdblink\b',
-
-            r'\bpg_sleep\b',
-
-            r'\bpg_terminate_backend\b',
-
-            r'\bpg_cancel_backend\b',
-
-            r'\bcurrent_setting\b',
-
-            r'\bSET\s+(SESSION\s+|LOCAL\s+)?statement_timeout\b',
-
-            r'\bpg_authid\b',
-
-            r'\bpg_shadow\b'
-
-        ]
-
-    else:
-
-        # Strictly prohibited commands for standard master databases (pagila, classicmodels)
-
-        forbidden_patterns = [
-
-            r'\bDROP\b',
-
-            r'\bALTER\b',
-
-            r'\bTRUNCATE\b',
-
-            r'\bGRANT\b',
-
-            r'\bREVOKE\b',
-
-            r'\bCREATE\s+(ROLE|USER|DATABASE|EXTENSION)\b',
-
-            r'\bCOPY\b',
-
-            r'\bVACUUM\b',
-
-            r'\bpg_read_file\b',
-
-            r'\bpg_write_file\b',
-
-            r'\blo_import\b',
-
-            r'\blo_export\b',
-
-            r'\bdblink\b',
-
-            r'\bpg_sleep\b',
-
-            r'\bpg_terminate_backend\b',
-
-            r'\bpg_cancel_backend\b',
-
-            r'\bcurrent_setting\b',
-
-            r'\bSET\s+(SESSION\s+|LOCAL\s+)?statement_timeout\b',
-
-            r'\bpg_authid\b',
-
-            r'\bpg_shadow\b'
-
-        ]
-
-
-
-    for pat in forbidden_patterns:
-
-        if re.search(pat, cleaned, re.IGNORECASE):
-
-            match_word = re.search(pat, cleaned, re.IGNORECASE).group(0)
-
-            return f"Perintah berbahaya terdeteksi ('{match_word}'). Operasi ini dilarang pada sistem ujian!"
-
+    try:
+        prepare_sql(query_text, sandbox=is_sandbox_student)
+    except SQLPolicyError as error:
+        return f"Perintah berbahaya terdeteksi: {error}"
+    except (ParseError, ValueError):
+        pass
     return None
 
 
-
-def execute_student_query(
-
-    query_text: str,
-
-    active_db: str = DEFAULT_EXAM_DB,
-
-    nim: Optional[str] = None
-
-) -> Dict[str, Any]:
-
-    """
-
-    Executes a student query within the specified PostgreSQL database sandbox.
-
-    Supports:
-
-    - Multi-Database routing (pagila, classicmodels, sandbox_pribadi)
-
-    - Dedicated schema sandbox per student for Level Easy (CREATE/INSERT/DROP)
-
-    - 3-second statement_timeout
-
-    - Read-only rollback for master databases, autocommit persistence for sandbox schema
-
-    """
-
-    query_text = (query_text or "").strip()
-
-    if not query_text:
-
-        return {"success": False, "error": "Query SQL tidak boleh kosong."}
-
-    if len(query_text) > MAX_STUDENT_QUERY_LENGTH:
-
-        return {"success": False, "error": f"Panjang query melebihi batas maksimal ({MAX_STUDENT_QUERY_LENGTH} karakter)."}
-
-    active_db = (active_db or DEFAULT_EXAM_DB).strip().lower().split('(')[0].strip()
-
-    if active_db not in ALLOWED_STUDENT_DBS:
-
-        return {"success": False, "error": f"Database '{active_db}' tidak valid. Pilihan yang diizinkan: {', '.join(sorted(ALLOWED_STUDENT_DBS))}."}
-
-    is_sandbox = (active_db == "sandbox_pribadi")
-
-
-
-    # Remove trailing semicolon if single query
-
-    clean_query = query_text
-
-    if clean_query.endswith(";"):
-
-        clean_query = clean_query[:-1].strip()
-
-
-
-    danger_error = check_dangerous_sql(clean_query, is_sandbox_student=is_sandbox)
-
-    if danger_error:
-
-        return {"success": False, "error": danger_error}
-
-
-
-    start_time = time.time()
-
-    conn = None
-
-    pool_inst = None
-
-    try:
-
-        if is_sandbox:
-
-            schema_name = init_student_sandbox_schema(nim or "default")
-
-            pool_inst = get_pg_student_pool_for_db(DEFAULT_EXAM_DB)
-            conn = acquire_pooled_connection(pool_inst, dbname=DEFAULT_EXAM_DB)
-
-            conn.autocommit = True
-
-            cur = conn.cursor()
-
-            cur.execute("SET statement_timeout = 5000;")
-
-            cur.execute("SET lock_timeout = 3000;")
-
-            cur.execute(sql.SQL("SET search_path TO {}, public;").format(sql.Identifier(schema_name)))
-
-
-
-            # Split statements to intercept CREATE DATABASE, USE, DROP DATABASE
-
-            stmts = split_sql_statements(clean_query)
-
-            last_desc = None
-
-            last_fetched = None
-
-            total_affected = 0
-
-            executed_any_pg = False
-
-            created_virtual_db = None
-
-            dropped_virtual_db = None
-
-
-
-            for st in stmts:
-
-                st_strip = st.strip()
-
-                if not st_strip:
-
-                    continue
-
-
-
-                # Intercept CREATE DATABASE
-
-                m_cdb = re.match(r'^\s*CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)', st_strip, re.IGNORECASE)
-
-                if m_cdb:
-
-                    created_virtual_db = m_cdb.group(1).lower()
-
-                    set_student_virtual_database(nim, created_virtual_db)
-
-                    try:
-
-                        cur.execute(sql.SQL("COMMENT ON SCHEMA {} IS %s;").format(sql.Identifier(schema_name)), (f"virtual_db:{created_virtual_db}",))
-
-                    except Exception:
-
-                        pass
-
-                    continue
-
-
-
-                # Intercept DROP DATABASE
-
-                m_ddb = re.match(r'^\s*DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z0-9_]+)', st_strip, re.IGNORECASE)
-
-                if m_ddb:
-
-                    target_drop = m_ddb.group(1).lower()
-
-                    if target_drop in {"postgres", "pagila", "classicmodels", "template0", "template1", "praktikum_db"}:
-
-                        cur.close()
-
-                        pool_inst.putconn(conn)
-
-                        return {"success": False, "error": f"Pelanggaran Keamanan: Dilarang menghapus database sistem '{target_drop}'!"}
-
-                    dropped_virtual_db = target_drop
-
-                    clear_student_virtual_database(nim)
-
-                    try:
-
-                        cur.execute(sql.SQL("""
-
-                            DO $$ DECLARE
-
-                                r RECORD;
-
-                            BEGIN
-
-                                FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = {sch}) LOOP
-
-                                    EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident({sch}) || '.' || quote_ident(r.tablename) || ' CASCADE';
-
-                                END LOOP;
-
-                            END $$;
-
-                        """).format(sch=sql.Literal(schema_name)))
-
-                        cur.execute(sql.SQL("COMMENT ON SCHEMA {} IS NULL;").format(sql.Identifier(schema_name)))
-
-                    except Exception:
-
-                        pass
-
-                    continue
-
-
-
-                # Intercept USE <database>
-
-                m_use = re.match(r'^\s*USE\s+([a-zA-Z0-9_]+)', st_strip, re.IGNORECASE)
-
-                if m_use:
-
-                    target_use = m_use.group(1).lower()
-
-                    set_student_virtual_database(nim, target_use)
-
-                    continue
-
-
-
-                # Execute statement in PostgreSQL
-
-                cur.execute(st_strip)
-
-                executed_any_pg = True
-
-                if cur.description:
-
-                    last_desc = cur.description
-
-                    last_fetched = cur.fetchmany(501)
-
-                elif cur.rowcount and cur.rowcount > 0:
-
-                    total_affected += cur.rowcount
-
-
-
-            columns = []
-
-            rows = []
-
-            row_count = 0
-
-            is_truncated = False
-
-
-
-            if executed_any_pg and last_desc and last_fetched is not None:
-
-                columns = [desc[0] for desc in last_desc]
-
-                fetched = last_fetched
-
-                row_count = len(fetched)
-
-                if row_count > 500:
-
-                    is_truncated = True
-
-                    fetched = fetched[:500]
-
-                    row_count = 500
-
-
-
-                for r in fetched:
-
-                    row_items = []
-                    for val in r:
-                        if val is None:
-                            row_items.append(None)
-                        elif isinstance(val, bool):
-                            row_items.append(val)
-                        elif isinstance(val, int):
-                            row_items.append(val)
-                        elif isinstance(val, decimal.Decimal):
-                            row_items.append(str(val))
-                        elif isinstance(val, float):
-                            row_items.append(val)
-                        elif isinstance(val, (datetime.date, datetime.datetime, datetime.time)):
-                            row_items.append(val.isoformat())
-                        elif hasattr(val, '__float__'):
-                            row_items.append(float(val))
-                        else:
-                            s_val = str(val)
-                            if len(s_val) > MAX_OUTPUT_CELL_CHARS:
-                                s_val = s_val[:MAX_OUTPUT_CELL_CHARS] + " ...[truncated]"
-                            row_items.append(s_val)
-                    rows.append(row_items)
-
-            else:
-
-                row_count = total_affected
-
-
-
-            execution_time_ms = round((time.time() - start_time) * 1000, 2)
-
-            cur.close()
-
-            pool_inst.putconn(conn)
-
-            conn = None
-
-
-
-            current_vdb = get_student_virtual_database(nim) or ""
-
-            if created_virtual_db and not executed_any_pg:
-
-                msg = f"Query OK. Database virtual '{created_virtual_db}' berhasil dibuat di sandbox pribadi Anda ({execution_time_ms} ms)."
-
-            elif dropped_virtual_db and not executed_any_pg:
-
-                msg = f"Query OK. Database '{dropped_virtual_db}' dan seluruh tabelnya berhasil dibersihkan dari sandbox pribadi Anda ({execution_time_ms} ms)."
-
-            elif created_virtual_db and executed_any_pg:
-
-                msg = f"Database virtual '{created_virtual_db}' aktif. Perintah SQL ({row_count} baris terpengaruh) berhasil dijalankan ({execution_time_ms} ms)."
-
-            elif not last_desc:
-
-                msg = f"Perintah SQL berhasil dijalankan ({row_count} baris terpengaruh) dalam {execution_time_ms} ms."
-
-            else:
-
-                msg = f"Query berhasil dieksekusi ({row_count} baris) dalam {execution_time_ms} ms."
-
-
-
-            return {
-
-                "success": True,
-
-                "columns": columns,
-
-                "rows": rows,
-
-                "row_count": row_count,
-
-                "is_truncated": is_truncated,
-
-                "execution_time_ms": execution_time_ms,
-
-                "message": msg,
-
-                "virtual_db": current_vdb
-
-            }
-
-        else:
-
-            pool_inst = get_pg_student_pool_for_db(active_db)
-            conn = acquire_pooled_connection(pool_inst, dbname=active_db)
-
-            conn.autocommit = False
-
-            cur = conn.cursor()
-
-            cur.execute("SET statement_timeout = 5000;")
-
-            cur.execute("SET lock_timeout = 3000;")
-
-            cur.execute("SET search_path TO public;")
-
-            cur.execute(clean_query)
-
-
-
-            columns = []
-
-            rows = []
-
-            row_count = 0
-
-            is_truncated = False
-
-
-
-            if cur.description:
-
-                columns = [desc[0] for desc in cur.description]
-
-                fetched = cur.fetchmany(501)
-
-                row_count = len(fetched)
-
-                if row_count > 500:
-
-                    is_truncated = True
-
-                    fetched = fetched[:500]
-
-                    row_count = 500
-
-
-
-                for r in fetched:
-
-                    row_items = []
-                    for val in r:
-                        if val is None:
-                            row_items.append(None)
-                        elif isinstance(val, bool):
-                            row_items.append(val)
-                        elif isinstance(val, int):
-                            row_items.append(val)
-                        elif isinstance(val, decimal.Decimal):
-                            row_items.append(str(val))
-                        elif isinstance(val, float):
-                            row_items.append(val)
-                        elif isinstance(val, (datetime.date, datetime.datetime, datetime.time)):
-                            row_items.append(val.isoformat())
-                        elif hasattr(val, '__float__'):
-                            row_items.append(float(val))
-                        else:
-                            row_items.append(str(val))
-                    rows.append(row_items)
-
-            else:
-
-                row_count = cur.rowcount if cur.rowcount != -1 else 0
-
-
-
-            execution_time_ms = round((time.time() - start_time) * 1000, 2)
-
-
-
-            conn.rollback()
-
-            cur.close()
-
-            pool_inst.putconn(conn)
-
-            conn = None
-
-
-
-            msg = f"Query berhasil dieksekusi ({row_count} baris) dalam {execution_time_ms} ms."
-
-            if not cur.description:
-
-                msg = f"Perintah SQL berhasil dijalankan ({row_count} baris terpengaruh) dalam {execution_time_ms} ms."
-
-
-
-            return {
-
-                "success": True,
-
-                "columns": columns,
-
-                "rows": rows,
-
-                "row_count": row_count,
-
-                "is_truncated": is_truncated,
-
-                "execution_time_ms": execution_time_ms,
-
-                "message": msg
-
-            }
-
-
-
-    except psycopg2.extensions.QueryCanceledError:
-
-        if conn and not conn.closed:
-
-            try:
-
-                conn.rollback()
-
-            except Exception:
-
-                pass
-
-        return {"success": False, "error": "Query timeout: Waktu eksekusi melebihi batas 5 detik atau terkendala lock tabel."}
-
-    except Exception as e:
-
-        if conn and not conn.closed and not is_sandbox:
-
-            try:
-
-                conn.rollback()
-
-            except Exception:
-
-                pass
-
-        sanitized_msg = sanitize_db_error_message(e)
-
-        return {"success": False, "error": f"PostgreSQL Error: {sanitized_msg}"}
-
-    finally:
-
-        if conn and not conn.closed and pool_inst:
-
-            try:
-
-                pool_inst.putconn(conn)
-
-            except Exception:
-
-                pass
-
-
-
-
-
-# ==============================================================================
-
-# Auto-Grader Deep DDL & DML Inspection Engine (Fase 1 & Fase 2)
-
-# ==============================================================================
-
+def execute_student_query(query_text: str, active_db: str = DEFAULT_EXAM_DB, nim: Optional[str] = None) -> Dict[str, Any]:
+    from query_runner import execute
+    return execute(query_text, active_db, nim)
 
 
 def extract_table_name_from_ddl(ddl_sql: str) -> Optional[str]:
@@ -5874,7 +3786,7 @@ def invalidate_schema_cache(db_name: Optional[str] = None):
 def get_database_schema(db_name: str = DEFAULT_EXAM_DB, nim: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
     """
     Introspects tables and columns dynamically with in-memory caching.
-    - If db_name == 'sandbox_pribadi', inspects the student's personal schema (sandbox_{nim}).
+    - If db_name == 'sandbox_pribadi', inspects the student's hashed personal schema.
     - Otherwise, inspects public tables of the selected PostgreSQL database (pagila, classicmodels, etc.) and caches results.
     Returns: { "table_name": [{"name": col, "type": type, "nullable": bool, "pk": bool}] }
     """
@@ -6152,83 +4064,30 @@ def get_classicmodels_fk_relations() -> list:
 
 
 def verify_system_health() -> Dict[str, Any]:
-
-    """Verifies connections to SQLite and PostgreSQL."""
-
-    health = {"sqlite": False, "postgres_admin": False, "postgres_student": False, "details": {}}
-
-
-
-    # SQLite check
-
+    health = {"sqlite":False, "postgres_admin":False, "postgres_student":False,
+              "databases":{}, "details":{}}
     try:
-
-        conn = get_sqlite_conn()
-
-        cur = conn.cursor()
-
-        cur.execute("SELECT COUNT(*) FROM questions;")
-
-        health["sqlite"] = True
-
-        health["details"]["sqlite_questions"] = cur.fetchone()[0]
-
-        conn.close()
-
-    except Exception as e:
-
-        health["details"]["sqlite_error"] = str(e)
-
-
-
-    # Postgres Admin check
-
-    try:
-
-        conn = get_pg_admin_connection()
-
-        cur = conn.cursor()
-
-        cur.execute("SELECT current_database(), current_user;")
-
-        row = cur.fetchone()
-
-        health["postgres_admin"] = True
-
-        health["details"]["pg_admin_db"] = row[0]
-
-        health["details"]["pg_admin_user"] = row[1]
-
-        conn.close()
-
-    except Exception as e:
-
-        health["details"]["pg_admin_error"] = str(e)
-
-
-
-    # Postgres Student check
-
-    try:
-
-        conn = get_pg_student_connection()
-
-        cur = conn.cursor()
-
-        cur.execute("SELECT 1;")
-
-        health["postgres_student"] = True
-
-        conn.close()
-
-    except Exception as e:
-
-        health["details"]["pg_student_error"] = str(e)
-
-
-
+        with closing(get_sqlite_conn()) as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM questions").fetchone()
+            health["sqlite"] = version == SQLITE_SCHEMA_VERSION
+            health["details"]["sqlite_version"] = version
+    except Exception as error:
+        health["details"]["sqlite_error"] = type(error).__name__
+    for name in sorted(ALLOWED_MASTER_DBS):
+        checks = {"admin":False, "student":False}
+        for identity, factory in (("admin",get_pg_admin_connection),("student",get_pg_student_connection)):
+            try:
+                with closing(factory(name)) as conn, conn.cursor() as cursor:
+                    cursor.execute("SET statement_timeout=1000")
+                    cursor.execute("SELECT 1")
+                    checks[identity] = cursor.fetchone()[0] == 1
+            except Exception as error:
+                health["details"][name+"_"+identity+"_error"] = type(error).__name__
+        health["databases"][name] = checks
+    health["postgres_admin"] = bool(health["databases"]) and all(v["admin"] for v in health["databases"].values())
+    health["postgres_student"] = bool(health["databases"]) and all(v["student"] for v in health["databases"].values())
     return health
-
 
 
 # ==============================================================================
@@ -6239,146 +4098,96 @@ def verify_system_health() -> Dict[str, Any]:
 
 
 
+EXAM_STATES = {"waiting", "active", "finished"}
+
+
 def get_exam_state() -> str:
-
-    """Returns 'waiting' or 'active'. Defaults to 'waiting' if not set."""
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    cur.execute("SELECT value FROM system_settings WHERE key = 'exam_state';")
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    return row["value"] if row else "waiting"
-
+    with closing(get_sqlite_conn()) as conn:
+        row = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        return row["value"] if row else "waiting"
 
 
 def set_exam_state(state: str) -> None:
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        _set_exam_state(conn, state)
 
-    """Sets exam state to 'waiting' or 'active'."""
 
-    conn = get_sqlite_conn()
+def start_exam_validated():
+    from grading_engine import validate_reference
+    import grading_queue
+    with closing(get_sqlite_conn()) as conn:
+        if grading_queue.setting(conn,"grading_maintenance",""):
+            raise ValueError("Dataset sedang dipelihara; ujian belum dapat dimulai.")
+        dataset_revision = grading_queue.setting(conn,"dataset_revision")
+        state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if state and state[0] == "active":
+            return
+        revision = conn.execute("SELECT value FROM system_settings WHERE key='exam_revision'").fetchone()
+        revision = revision[0] if revision else None
+        questions = [dict(row) for row in conn.execute("SELECT q.* FROM questions q JOIN exam_packages p ON UPPER(p.code)=UPPER(q.category) WHERE p.is_active=1 ORDER BY q.category,q.question_number,q.id")]
+    if not questions:
+        raise ValueError("Belum ada soal dalam paket aktif.")
+    manifest = [(q["id"], q["question_revision"]) for q in questions]
+    validations = []
+    for q in questions:
+        try:
+            result = validate_reference(q["expected_query"], q["target_database"], q["grading_policy"], q["setup_query"], q["id"])
+            validations.append((result["status"], q["id"]))
+        except Exception as error:
+            raise ValueError(f"Acuan soal {q['category']} nomor {q['question_number']} (ID {q['id']}) gagal divalidasi. Periksa acuan, prasyarat, dan batas evaluator.") from error
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current_revision = conn.execute("SELECT value FROM system_settings WHERE key='exam_revision'").fetchone()
+        current_manifest = [tuple(row) for row in conn.execute("SELECT q.id,q.question_revision FROM questions q JOIN exam_packages p ON UPPER(p.code)=UPPER(q.category) WHERE p.is_active=1 ORDER BY q.category,q.question_number,q.id")]
+        if (grading_queue.setting(conn,"grading_maintenance","") or grading_queue.setting(conn,"dataset_revision") != dataset_revision
+                or (current_revision[0] if current_revision else None) != revision or current_manifest != manifest):
+            raise ValueError("Konfigurasi ujian berubah selama validasi. Mulai kembali setelah perubahan selesai.")
+        conn.executemany("UPDATE questions SET reference_validation=? WHERE id=?", validations)
+        _set_exam_state(conn, "active")
 
-    with conn:
 
-        conn.execute(
-
-            "INSERT INTO system_settings (key, value) VALUES ('exam_state', ?) "
-
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-
-            (state,)
-
-        )
-
-        action = "exam_started" if state == "active" else "exam_stopped"
-
-        label = "Ujian dimulai oleh admin." if state == "active" else "Ujian dihentikan oleh admin."
-
-        conn.execute(
-
-            "INSERT INTO exam_logs (action_type, details) VALUES (?, ?);",
-
-            (action, label)
-
-        )
-
-    conn.close()
-
+def _set_exam_state(conn, state):
+    if state not in EXAM_STATES:
+        raise ValueError(f"Status ujian tidak valid: {state}")
+    old = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+    if old and old["value"] == state:
+        return
+    conn.execute("INSERT INTO system_settings (key,value) VALUES ('exam_state',?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (state,))
+    conn.execute("INSERT INTO system_settings (key,value) VALUES ('exam_revision','1') "
+                 "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+    action, label = {
+        "waiting": ("exam_prepared", "Ujian dalam persiapan."),
+        "active": ("exam_started", "Ujian dimulai oleh pengawas."),
+        "finished": ("exam_stopped", "Ujian diakhiri oleh pengawas."),
+    }[state]
+    conn.execute("INSERT INTO exam_logs (action_type,details) VALUES (?,?)", (action, label))
 
 
 def get_waiting_room_participants() -> list:
-
-    """Returns students currently active in the waiting room (heartbeat within 20s)."""
-
-    conn = get_sqlite_conn()
-
-    cur = conn.cursor()
-
-    cur.execute(
-
-        """
-
-        SELECT nim, name, ip_address, last_active, status
-
-        FROM users
-
-        WHERE status = 'waiting'
-
-          AND last_active >= datetime('now', '-20 seconds')
-
-        ORDER BY last_active DESC;
-
-        """
-
-    )
-
-    rows = cur.fetchall()
-
-    conn.close()
-
-    return [dict(r) for r in rows]
+    with closing(get_sqlite_conn()) as conn:
+        rows = conn.execute("""SELECT nim,name,ip_address,last_active,status FROM users
+            WHERE status='waiting' AND last_active >= datetime('now','-20 seconds')
+            ORDER BY last_active DESC""").fetchall()
+        return [dict(row) for row in rows]
 
 
-
-def mark_student_waiting(nim: str) -> None:
-
-    """Marks a student as 'waiting' with fresh last_active timestamp."""
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute(
-
-            "UPDATE users SET status = 'waiting', last_active = CURRENT_TIMESTAMP WHERE nim = ?;",
-
-            (nim,)
-
-        )
-
-    conn.close()
+def mark_student_waiting(nim: str, session_token: str, request_ip: str) -> None:
+    _mark_student_location(nim, session_token, request_ip, "waiting")
 
 
-
-def heartbeat_student_waiting(nim: str) -> None:
-
-    """Touch last_active for a student in the waiting room without changing status."""
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute(
-
-            "UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE nim = ? AND status = 'waiting';",
-
-            (nim,)
-
-        )
-
-    conn.close()
+def heartbeat_student_waiting(nim: str, session_token: str, request_ip: str) -> None:
+    _mark_student_location(nim, session_token, request_ip, "waiting")
 
 
+def mark_student_in_exam(nim: str, session_token: str, request_ip: str) -> None:
+    _mark_student_location(nim, session_token, request_ip, "online")
 
-def mark_student_in_exam(nim: str) -> None:
 
-    """Marks a student as 'online' (in exam) when they enter the exam page."""
-
-    conn = get_sqlite_conn()
-
-    with conn:
-
-        conn.execute(
-
-            "UPDATE users SET status = 'online', last_active = CURRENT_TIMESTAMP WHERE nim = ?;",
-
-            (nim,)
-
-        )
-
-    conn.close()
+def _mark_student_location(nim, session_token, request_ip, location):
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        user = require_student_access(nim, session_token, request_ip, active=location == "online", conn=conn)
+        target = "online" if user["exam_state"] == "active" else "waiting"
+        conn.execute("UPDATE users SET status=?,last_active=CURRENT_TIMESTAMP WHERE id=?", (target, user["id"]))

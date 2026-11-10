@@ -5,6 +5,7 @@
 
 
 <head>
+    {% if admin_practice %}<meta name="admin-csrf-token" content="{{ csrf_token }}">{% endif %}
 
     <meta charset="UTF-8">
 
@@ -52,7 +53,7 @@
 
     <link rel="stylesheet" href="/static/vendor/codemirror/addon/hint/show-hint.css">
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20261104_v1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20261108_practice">
 
     <script>
         // Global safe fallback for showToast to avoid ReferenceError if called before modules load
@@ -254,7 +255,7 @@
 
 
 
-<body data-nim="{{ user.nim }}" data-token="{{ user.session_token }}" data-category="{{ user.selected_category or '' }}">
+<body class="exam-workspace" data-nim="{{ user.nim }}" data-token="{{ user.session_token }}" data-category="{{ user.selected_category or '' }}" data-admin-practice="{{ 'true' if admin_practice else 'false' }}">
 
 
 
@@ -266,7 +267,7 @@
 
             <span class="brand-logo-badge">EXAM IDE</span>
 
-            <div class="brand-title">Ujian Praktikum Basis Data</div>
+            <div class="brand-title">{{ 'Simulasi Ujian Admin' if admin_practice else 'Ujian Praktikum Basis Data' }}</div>
 
             <span id="network-status-badge" class="status-badge badge-online" title="Koneksi jaringan dan server aktif stabil">
                 <span class="network-status-dot"></span>
@@ -281,7 +282,7 @@
 
             <div class="user-tag">
 
-                <span>NIM: <strong>{{ user.nim }}</strong></span>
+                <span>{{ 'Mode:' if admin_practice else 'NIM:' }} <strong>{{ 'Pengujian' if admin_practice else user.nim }}</strong></span>
 
                 <span style="color: var(--text-subtle);">|</span>
 
@@ -333,11 +334,16 @@
 
             </div>
 
+            {% if admin_practice %}
+            <button type="button" class="btn btn-secondary btn-sm header-action" id="btn-practice-reset-package">Ganti paket</button>
+            <a class="btn btn-secondary btn-sm header-action" href="/admin">Kembali ke admin</a>
+            {% else %}
             <button type="button" class="btn btn-secondary btn-sm header-action" id="btn-logout-trigger" onclick="openExitModal()">
 
                 Keluar
 
             </button>
+            {% endif %}
 
         </div>
 
@@ -895,7 +901,16 @@
 
             window.isLoggingOut = true;
 
-            window.location.href = "/logout";
+            const form = document.createElement("form");
+            form.method = "POST";
+            form.action = "/logout";
+            const token = document.createElement("input");
+            token.type = "hidden";
+            token.name = "session_token";
+            token.value = document.body.dataset.token;
+            form.appendChild(token);
+            document.body.appendChild(form);
+            form.submit();
 
         }
 
@@ -923,7 +938,8 @@
 
     <script src="/static/vendor/codemirror/addon/hint/sql-hint.js"></script>
 
-    <script src="/static/js/student.js?v=20261104_v1"></script>
+    <script src="/static/vendor/sql-formatter/sql-formatter.min.js?v=15.9.0"></script>
+    <script src="/static/js/student.js?v=20261108_practice"></script>
 
 
 
@@ -948,6 +964,8 @@
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
 
                     <span id="lightbox-counter" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;"></span>
+
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-original-image-size" aria-pressed="false">Ukuran asli</button>
 
                     <button type="button" class="image-lightbox-close" id="btn-close-lightbox" onclick="closeImageLightbox()" title="Tutup (Esc)">✕</button>
 

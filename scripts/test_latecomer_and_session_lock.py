@@ -14,6 +14,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from test_support import ensure_test_environment
+
+ensure_test_environment()
+
+from admin_test_support import authenticate_admin
 import database
 import main
 from fastapi.testclient import TestClient
@@ -108,7 +113,7 @@ class LatecomerAndSessionLockTestSuite(unittest.TestCase):
 
         # Re-login from same device with fresh token
         token1_b = str(uuid.uuid4())
-        ok1_b, user1_b, err1_b = database.login_student(self.nim1, self.name1, self.ip_shared, token1_b, self.dev1)
+        ok1_b, user1_b, err1_b = database.login_student(self.nim1, self.name1, self.ip_shared, token1_b, self.dev1, resume_token=token1)
         self.assertTrue(ok1_b, f"Resume session failed: {err1_b}")
         self.assertEqual(user1_b["session_token"], token1_b)
         self.assertEqual(user1_b["status"], "online")
@@ -198,7 +203,7 @@ class LatecomerAndSessionLockTestSuite(unittest.TestCase):
         database.login_student(self.nim1, self.name1, self.ip_shared, token1, self.dev1)
 
         # Set admin cookie
-        self.client.cookies.set("admin_session", main.CURRENT_ADMIN_SESSION_TOKEN)
+        authenticate_admin(self.client)
 
         res = self.client.post("/api/admin/clear-session-lock", json={"nim": self.nim1})
         self.assertEqual(res.status_code, 200)

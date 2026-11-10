@@ -1,0 +1,192 @@
+[
+  {
+    "path": "INSTALLATION MANUAL.md",
+    "kind": "product",
+    "lines": 82
+  },
+  {
+    "path": "README.md",
+    "kind": "product",
+    "lines": 429
+  },
+  {
+    "path": "antislop.md",
+    "kind": "agent_rules",
+    "lines": 719
+  },
+  {
+    "path": "docs/README.md",
+    "kind": "product",
+    "lines": 46
+  },
+  {
+    "path": "docs/design/ARCHITECTURE_EVALUATION.md",
+    "kind": "product",
+    "lines": 30
+  },
+  {
+    "path": "docs/design/antislop.md",
+    "kind": "agent_rules",
+    "lines": 719
+  },
+  {
+    "path": "docs/operations/ADMIN_IDE.md",
+    "kind": "product",
+    "lines": 33
+  },
+  {
+    "path": "docs/operations/ADMIN_SECURITY.md",
+    "kind": "product",
+    "lines": 137
+  },
+  {
+    "path": "docs/operations/EXAM_CONTROL.md",
+    "kind": "product",
+    "lines": 110
+  },
+  {
+    "path": "docs/operations/GRADING.md",
+    "kind": "product",
+    "lines": 150
+  },
+  {
+    "path": "docs/operations/GRADING_QUEUE.md",
+    "kind": "product",
+    "lines": 163
+  },
+  {
+    "path": "docs/operations/OPERATIONS_GUIDE.md",
+    "kind": "product",
+    "lines": 60
+  },
+  {
+    "path": "docs/operations/RELEASE_READINESS.md",
+    "kind": "product",
+    "lines": 176
+  },
+  {
+    "path": "docs/operations/SANDBOX_SECURITY.md",
+    "kind": "product",
+    "lines": 163
+  },
+  {
+    "path": "docs/operations/TESTING.md",
+    "kind": "product",
+    "lines": 159
+  },
+  {
+    "path": "docs/reports/ADMIN_BEHAVIOR_AUDIT.md",
+    "kind": "product",
+    "lines": 66
+  },
+  {
+    "path": "docs/reports/ADMIN_BEHAVIOR_FIXES.md",
+    "kind": "product",
+    "lines": 52
+  },
+  {
+    "path": "docs/reports/ADMIN_IDE_IMPLEMENTATION.md",
+    "kind": "product",
+    "lines": 29
+  },
+  {
+    "path": "docs/reports/DOCUMENTATION_REVIEW.md",
+    "kind": "product",
+    "lines": 48
+  },
+  {
+    "path": "docs/reports/EXAM_START_FAILURE_TESTS.md",
+    "kind": "product",
+    "lines": 32
+  },
+  {
+    "path": "docs/reports/FINAL_TEST_FIXES.md",
+    "kind": "product",
+    "lines": 33
+  },
+  {
+    "path": "docs/reports/FINAL_TEST_MINUTES_ANALYSIS.md",
+    "kind": "product",
+    "lines": 171
+  },
+  {
+    "path": "docs/reports/GRADING_FAIRNESS_AUDIT.md",
+    "kind": "product",
+    "lines": 96
+  },
+  {
+    "path": "docs/reports/GRADING_FAIRNESS_FIXES.md",
+    "kind": "product",
+    "lines": 69
+  },
+  {
+    "path": "docs/reports/ORDER_BY_TIES.md",
+    "kind": "product",
+    "lines": 24
+  },
+  {
+    "path": "docs/reports/PHASE1_BASELINE_AND_MIGRATIONS.md",
+    "kind": "product",
+    "lines": 102
+  },
+  {
+    "path": "docs/reports/PHASE2_EXAM_AND_SESSIONS.md",
+    "kind": "product",
+    "lines": 108
+  },
+  {
+    "path": "docs/reports/PHASE3_SANDBOX_ISOLATION.md",
+    "kind": "product",
+    "lines": 128
+  },
+  {
+    "path": "docs/reports/PHASE4_COMPLETION_REPORT.md",
+    "kind": "product",
+    "lines": 44
+  },
+  {
+    "path": "docs/reports/PHASE4_GRADING_CORRECTNESS.md",
+    "kind": "product",
+    "lines": 101
+  },
+  {
+    "path": "docs/reports/PHASE5_ADMIN_SECURITY.md",
+    "kind": "product",
+    "lines": 101
+  },
+  {
+    "path": "docs/reports/PHASE6_OPERATIONAL_READINESS.md",
+    "kind": "product",
+    "lines": 126
+  },
+  {
+    "path": "docs/reports/PHASE7_PERSISTENT_GRADING.md",
+    "kind": "product",
+    "lines": 132
+  },
+  {
+    "path": "docs/reports/SQL_FUNCTION_DENYLIST.md",
+    "kind": "product",
+    "lines": 32
+  },
+  {
+    "path": "static/vendor/codemirror/CHANGELOG.md",
+    "kind": "vendor",
+    "lines": 2250
+  },
+  {
+    "path": "static/vendor/codemirror/CONTRIBUTING.md",
+    "kind": "vendor",
+    "lines": 92
+  },
+  {
+    "path": "static/vendor/codemirror/README.md",
+    "kind": "vendor",
+    "lines": 48
+  },
+  {
+    "path": "static/vendor/sql-formatter/README.md",
+    "kind": "vendor",
+    "lines": 10
+  }
+]

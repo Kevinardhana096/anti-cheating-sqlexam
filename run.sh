@@ -16,7 +16,7 @@ if command -v python3 >/dev/null 2>&1; then
 elif command -v python >/dev/null 2>&1; then
     SYS_PY="python"
 else
-    echo "[ERROR] Python tidak ditemukan! Pastikan Python 3.10+ sudah terpasang."
+    echo "[ERROR] Python tidak ditemukan! Pastikan Python 3.11+ sudah terpasang."
     exit 1
 fi
 
@@ -60,4 +60,4 @@ echo "Tekan Ctrl+C untuk menghentikan server."
 echo ""
 
 # 4. Menjalankan server FastAPI pada 0.0.0.0 (tanpa --reload demi stabilitas)
-exec "$VENV_PY" -m uvicorn main:app --host 0.0.0.0 --port 8000
+exec "$VENV_PY" -m uvicorn main:app --no-proxy-headers --host 0.0.0.0 --port 8000

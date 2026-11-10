@@ -7,7 +7,7 @@ Deskripsi:
   Utility CLI bagi Dosen & Pengawas Lab untuk membersihkan / me-reset data sesi ujian:
   1. Membersihkan data mahasiswa (tabel 'users' di SQLite).
   2. Membersihkan seluruh jawaban/submisi mahasiswa (tabel 'submissions' di SQLite).
-  3. Membersihkan seluruh schema sandbox PostgreSQL mahasiswa ('sandbox_*').
+  3. Reset per NIM juga menghapus schema dan role pribadi; --all hanya membersihkan SQLite.
   4. (Opsional) Membersihkan riwayat audit anti-cheat ('exam_logs' di SQLite).
   5. (Opsional) Me-reset sesi individu mahasiswa tertentu via --nim <NIM>.
   
@@ -18,7 +18,7 @@ Deskripsi:
 
 Penggunaan:
   python reset_exam_session.py --check          # Cek status data ujian saat ini (read-only)
-  python reset_exam_session.py --all            # Reset seluruh sesi mahasiswa & sandbox (ada konfirmasi)
+  python reset_exam_session.py --all            # Reset seluruh sesi mahasiswa di SQLite (ada konfirmasi)
   python reset_exam_session.py --all --yes      # Reset seluruh sesi langsung tanpa konfirmasi (force)
   python reset_exam_session.py --all --clear-logs -y  # Reset sesi + hapus log audit anti-cheat
   python reset_exam_session.py --nim 220101666  # Reset sesi mahasiswa tertentu (misal PC crash/hang)
@@ -111,7 +111,7 @@ def reset_single_student(nim: str):
     print(f"\n[ACTION] Mereset sesi mahasiswa individual dengan NIM: '{nim}' ...")
     res = database.reset_student_by_nim(nim)
     if not res["success"]:
-        print(f"\n[GAGAL] Mahasiswa dengan NIM '{nim}' tidak ditemukan dalam database ujian.")
+        print(f"\n[GAGAL] {res.get('message', 'Reset gagal.')}")
         sys.exit(1)
     
     print("\n[BERHASIL] Sesi mahasiswa berhasil direset:")
@@ -129,12 +129,12 @@ def reset_all_sessions(clear_logs: bool = False, force: bool = False):
     print("\n[PERINGATAN] ANDA AKAN MENGHAPUS:")
     print(f"  - {stats['students']} data mahasiswa login.")
     print(f"  - {stats['submissions']} jawaban/submisi mahasiswa.")
-    print(f"  - {len(stats['sandbox_schemas'])} schema sandbox isolasi PostgreSQL.")
+    print("  - Workspace PostgreSQL tidak dihapus oleh --all; gunakan reset per NIM sebelum membersihkan daftar peserta.")
     if clear_logs:
         print(f"  - {stats['logs']} riwayat log audit anti-cheat.")
     else:
         print(f"  - Log audit anti-cheat ({stats['logs']} baris) AKAN TETAP DISIMPAN.")
-    print("  * CATATAN: Bank Soal (60 Soal) dan Paket Ujian (6 Paket) TIDAK AKAN DIHAPUS.\n")
+    print("  * CATATAN: Bank soal dan paket ujian TIDAK AKAN DIHAPUS.\n")
 
     if not force:
         try:
@@ -146,7 +146,7 @@ def reset_all_sessions(clear_logs: bool = False, force: bool = False):
             print("\n\n[BATAL] Operasi dibatalkan.")
             sys.exit(0)
 
-    print("\n[PROSES] Sedang membersihkan sesi mahasiswa di SQLite dan PostgreSQL ...")
+    print("\n[PROSES] Sedang membersihkan sesi mahasiswa di SQLite ...")
     result = database.clear_previous_sessions(clear_logs=clear_logs)
     
     print("\n[BERHASIL] Data sesi ujian telah berhasil dibersihkan!")
@@ -173,7 +173,7 @@ def main():
     
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--check", action="store_true", help="Tampilkan status ringkas database ujian saat ini (read-only)")
-    group.add_argument("--all", action="store_true", help="Bersihkan seluruh sesi mahasiswa dan sandbox schema")
+    group.add_argument("--all", action="store_true", help="Bersihkan seluruh sesi/jawaban SQLite; workspace PostgreSQL tetap disimpan")
     group.add_argument("--nim", type=str, help="Reset sesi untuk satu mahasiswa tertentu berdasarkan NIM")
 
     parser.add_argument("--clear-logs", action="store_true", help="Hapus seluruh log audit anti-cheat saat mereset semua sesi")

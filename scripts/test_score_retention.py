@@ -19,6 +19,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from test_support import ensure_test_environment
+
+ensure_test_environment()
+
 import database
 import main
 from fastapi.testclient import TestClient
@@ -28,6 +32,7 @@ class ScoreRetentionTestSuite(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         database.init_system_db()
+        database.set_exam_state("active")
         cls.client = TestClient(main.app)
 
         cls.test_nim = "nim_test_retention_99"
@@ -49,7 +54,7 @@ class ScoreRetentionTestSuite(unittest.TestCase):
             conn.execute(
                 """
                 INSERT INTO users (nim, name, ip_address, session_token, status, selected_category, last_active)
-                VALUES (?, ?, 'testclient', ?, 'active', ?, CURRENT_TIMESTAMP);
+                VALUES (?, ?, 'testclient', ?, 'online', ?, CURRENT_TIMESTAMP);
                 """,
                 (cls.test_nim, cls.test_name, cls.test_token, cls.test_category)
             )
@@ -304,8 +309,8 @@ class ScoreRetentionTestSuite(unittest.TestCase):
         with open(student_html_path, "r", encoding="utf-8") as f:
             html_content = f.read()
 
-        self.assertIn("student.js?v=20261104_v1", html_content)
-        self.assertIn("style.css?v=20261104_v1", html_content)
+        self.assertRegex(html_content, r'student\.js\?v=[A-Za-z0-9_-]+')
+        self.assertRegex(html_content, r'style\.css\?v=[A-Za-z0-9_-]+')
         self.assertIn("window.showToast = window.showToast ||", html_content)
 
 

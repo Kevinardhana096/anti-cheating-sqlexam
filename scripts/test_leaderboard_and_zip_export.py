@@ -17,6 +17,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from test_support import ensure_test_environment
+
+ensure_test_environment()
+
+from admin_test_support import authenticate_admin
 import database
 import main
 from fastapi.testclient import TestClient
@@ -27,6 +32,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
     def setUpClass(cls):
         database.init_system_db()
         cls.client = TestClient(main.app)
+        cls.admin_token = authenticate_admin(cls.client)
 
         # Setup 3 mock test students
         cls.students_data = [
@@ -144,7 +150,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-LB-01: Leaderboard returns accurate total_score and correct_count."""
         res = self.client.get(
             "/api/admin/students",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -177,7 +183,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-LB-02: Leaderboard sorts students by total_score descending (Ranking)."""
         res = self.client.get(
             "/api/admin/students",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
         test_students = [s for s in res.json()["students"] if s["nim"] in self.user_ids]
@@ -193,7 +199,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-LB-03: Tab switches counter accurately reflected on leaderboard."""
         res = self.client.get(
             "/api/admin/students",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
         students_by_nim = {s["nim"]: s for s in res.json()["students"] if s["nim"] in self.user_ids}
@@ -208,7 +214,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-ZIP-01: Export returns valid ZIP file with PK\\x03\\x04 header."""
         res = self.client.get(
             "/api/admin/export/zip",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers.get("content-type"), "application/zip")
@@ -224,7 +230,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-ZIP-02: ZIP archive contains individual SQL file per student."""
         res = self.client.get(
             "/api/admin/export/zip",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
 
@@ -238,7 +244,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-ZIP-03: Student SQL files contain total score, correct count, and package header."""
         res = self.client.get(
             "/api/admin/export/zip",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
 
@@ -269,7 +275,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-ZIP-04: ZIP includes rekap_nilai_ujian.csv with all student records."""
         res = self.client.get(
             "/api/admin/export/zip",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
 
@@ -304,7 +310,7 @@ class LeaderboardAndZipExportTestSuite(unittest.TestCase):
         """TC-ZIP-05: Special characters in student names are safely sanitized."""
         res = self.client.get(
             "/api/admin/export/zip",
-            cookies={"admin_session": main.CURRENT_ADMIN_SESSION_TOKEN}
+            cookies={"admin_session": self.admin_token}
         )
         self.assertEqual(res.status_code, 200)
 

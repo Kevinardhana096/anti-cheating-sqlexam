@@ -1,0 +1,147 @@
+{
+  "created_at_utc": "2026-11-08T02:21:04.356649+00:00",
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.14.6",
+    "logical_cpus": 8,
+    "postgres": "18.6",
+    "http_server": "uvicorn, one process",
+    "fixture_fsync": false
+  },
+  "automatic_drain": true,
+  "students": 24,
+  "stages": [
+    {
+      "stage": "shared_ip_login",
+      "requests": 24,
+      "workers": 24,
+      "seconds": 0.434,
+      "operations_per_second": 55.24,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 148.7,
+      "p95_ms": 333.87,
+      "p99_ms": 391.6,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "master_preview",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 0.398,
+      "operations_per_second": 60.33,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 43.8,
+      "p95_ms": 129.81,
+      "p99_ms": 146.79,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "sandbox_cold_preview",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 3.11,
+      "operations_per_second": 7.72,
+      "outcomes": {
+        "ok": 24
+      },
+      "p50_ms": 480.35,
+      "p95_ms": 626.18,
+      "p99_ms": 646.4,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "paced_full_grading",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 2.449,
+      "operations_per_second": 9.8,
+      "outcomes": {
+        "graded_correct": 24
+      },
+      "p50_ms": 414.21,
+      "p95_ms": 500.84,
+      "p99_ms": 520.33,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "burst_full_grading",
+      "requests": 24,
+      "workers": 24,
+      "seconds": 1.53,
+      "operations_per_second": 15.69,
+      "outcomes": {
+        "graded_correct": 4,
+        "pending_limit": 20
+      },
+      "p50_ms": 611.04,
+      "p95_ms": 1394.64,
+      "p99_ms": 1496.98,
+      "unexpected_errors": []
+    },
+    {
+      "stage": "automatic_queue_drain_after_stop",
+      "seconds": 1.711,
+      "outcomes": {
+        "completed": 20
+      },
+      "unexpected_errors": []
+    },
+    {
+      "stage": "submit_after_stop",
+      "requests": 24,
+      "workers": 4,
+      "seconds": 0.137,
+      "operations_per_second": 174.75,
+      "outcomes": {
+        "blocked": 24
+      },
+      "p50_ms": 18.51,
+      "p95_ms": 37.53,
+      "p99_ms": 38.82,
+      "unexpected_errors": []
+    }
+  ],
+  "all_best_scores_preserved": true,
+  "pending_attempts_have_null_scores": true,
+  "diagnostics": {
+    "health": {
+      "sqlite": true,
+      "postgres_admin": true,
+      "postgres_student": true,
+      "databases": {
+        "classicmodels": {
+          "admin": true,
+          "student": true
+        },
+        "pagila": {
+          "admin": true,
+          "student": true
+        }
+      },
+      "details": {
+        "sqlite_version": 5
+      }
+    },
+    "pool": {
+      "total_acquired": 73,
+      "avg_wait_ms": 8.94,
+      "max_wait_ms": 116.02,
+      "exhausted_count": 0,
+      "active_pools": [
+        "pagila"
+      ]
+    },
+    "limits": {
+      "sandbox_connections_per_process": 20,
+      "grading_slots_per_process": 4,
+      "query_seconds": 5.0,
+      "grading_seconds": 10.0
+    }
+  },
+  "passed": true,
+  "limits": "Synthetic loopback workload, not a production class-capacity guarantee."
+}
