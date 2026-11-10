@@ -356,7 +356,7 @@ Sistem menyediakan pembatas akses dan catatan untuk membantu pengawasan. Log bro
 | **Anti-Joki Multi-Account IP**| Beberapa peserta boleh berbagi IP saat `ALLOW_SHARED_IP=true`; penguncian perangkat dan NIM tetap berlaku. |
 | **Isolasi PostgreSQL** | Database master memakai role read-only; sandbox memakai LOGIN tersendiri per mahasiswa dengan hak pada schema sendiri. |
 | **Kebijakan SQL** | Parser AST memeriksa seluruh skrip, jenis perintah, fungsi, dan referensi schema sebelum eksekusi. |
-| **Batas Eksekusi** | Anggaran SQL 5 detik untuk seluruh skrip, maksimal 20 statement, dengan batas hasil dan koneksi sandbox. |
+| **Batas Eksekusi** | Anggaran Run Query 60 detik untuk seluruh skrip, maksimal 20 statement, dengan batas hasil dan koneksi sandbox. |
 | **Pendeteksi Blur Tab** | Jika mahasiswa berpindah jendela/tab browser, sistem otomatis mencatat peringatan dan menghitung frekuensi perpindahan tab di dashboard pengawas. |
 | **Internal Web Dialog** | Konfirmasi keluar menggunakan modal DOM internal web (bukan `window.confirm` bawaan browser) untuk mencegah false-positive deteksi window blur saat mahasiswa menekan tombol keluar ujian. |
 

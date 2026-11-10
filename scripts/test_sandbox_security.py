@@ -170,8 +170,22 @@ class SandboxSecurityTests(unittest.TestCase):
             result = database.execute_student_query("SELECT pg_sleep(0.12); SELECT pg_sleep(0.12); SELECT pg_sleep(0.12)", "pagila")
         self.assertFalse(result["success"], result)
         self.assertIn("timeout", result["error"].lower())
+        self.assertIn("0.25 detik", result["error"])
         self.assertLess(time.monotonic() - started, 2)
         self.assertTrue(database.execute_student_query("SELECT 1", "pagila")["success"])
+
+    def test_run_query_longer_than_five_seconds_uses_one_minute_budget(self):
+        self.assertEqual(query_runner.QUERY_BUDGET_SECONDS, 60)
+        # Permit the delay only inside this disposable test to exercise a slow query.
+        prefixes = tuple(p for p in sql_policy.BLOCKED_FUNCTION_PREFIXES if p != 'pg_sleep')
+        with patch.object(sql_policy, 'BLOCKED_FUNCTION_PREFIXES', prefixes):
+            for target in ('pagila', 'sandbox_pribadi'):
+                with self.subTest(target=target):
+                    started = time.monotonic()
+                    result = database.execute_student_query('SELECT pg_sleep(6), 1 AS value', target, self.b)
+                    self.assertTrue(result['success'], result)
+                    self.assertEqual(result['rows'][0][1], 1)
+                    self.assertGreaterEqual(time.monotonic() - started, 6)
 
     def test_function_denylist_allows_general_builtins_on_real_connections(self):
         query="SELECT regexp_replace('abc123','[0-9]','','g') AS txt, to_number('12.50','99.99') AS n, md5('abc') AS digest, pg_typeof(1)::text AS kind"

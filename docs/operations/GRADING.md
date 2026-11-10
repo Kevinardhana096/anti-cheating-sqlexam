@@ -127,8 +127,9 @@ jawaban mahasiswa, termasuk simulasi admin. Nilainya harus lebih dari 0 dan maks
 Untuk memakai 60 detik di PowerShell, jalankan `$env:EXAM_GRADE_SECONDS="60"`
 sebelum `./run.bat`. Di macOS/Linux, jalankan `EXAM_GRADE_SECONDS=60 bash run.sh`.
 Restart server setelah mengubah nilai. Aplikasi tidak memuat `.env` otomatis.
-Anggaran ini berlaku untuk satu evaluasi, bukan per statement SQL. Batas Run Query
-di IDE diatur terpisah; menaikkan anggaran penilaian tidak mengubah batas tersebut.
+Anggaran ini berlaku untuk satu evaluasi, bukan per statement SQL. Run Query
+di IDE mahasiswa dan simulasi admin memiliki batas terpisah sebesar 60 detik untuk
+seluruh skrip. Mengubah `EXAM_GRADE_SECONDS` tidak mengubah batas Run Query tersebut.
 
 Batas terlampaui menghasilkan penilaian tertunda, bukan perbandingan fallback pada
 preview. Provisioning, koneksi, dan cleanup dapat menambah durasi respons. Batas ini

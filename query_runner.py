@@ -15,7 +15,7 @@ from psycopg2 import sql
 import sandbox_roles
 from sql_policy import prepare_sql, SQLPolicyError, ParseError
 
-QUERY_BUDGET_SECONDS = 5.0
+QUERY_BUDGET_SECONDS = 60.0
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_RESULT_COLUMNS = 64
 MAX_AFFECTED_ROWS = 10000
@@ -182,7 +182,7 @@ def execute(query_text, active_db, nim):
             result["virtual_db"] = virtual_db or ""
         return result
     except (TimeoutError, psycopg2.extensions.QueryCanceledError):
-        return {"success": False, "error": "Query timeout: batas durasi total permintaan SQL 5 detik terlampaui."}
+        return {"success": False, "error": f"Query timeout: batas durasi total permintaan SQL {QUERY_BUDGET_SECONDS:g} detik terlampaui."}
     except Exception as error:
         return {"success": False, "error": f"PostgreSQL Error: {db.sanitize_db_error_message(error)}"}
     finally:
