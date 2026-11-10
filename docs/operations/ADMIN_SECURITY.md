@@ -37,8 +37,11 @@ dan mempertahankan isi form. Kalimat bebas diletakkan pada judul/deskripsi; kolo
 kunci jawaban otomatis memerlukan SQL valid, misalnya `SELECT 1 AS uji` pada pagila.
 
 Kondisi ujian bersifat bersama: jika admin A mengakhiri ujian, admin B melihat status
-yang sama melalui polling berikutnya. Perintah mulai yang sedang memvalidasi acuan
-ditolak jika status/revisi ujian berubah selama validasi.
+yang sama melalui polling berikutnya. Validasi kesiapan dijalankan terpisah sebelum
+mulai dan hasilnya dibagikan ke semua admin. Hasil tidak disimpan jika konfigurasi
+atau status/revisi ujian berubah selama validasi. Perintah mulai hanya memeriksa
+kesiapan tersimpan dan memperbarui status dalam satu transaksi; SQL acuan tidak
+dijalankan saat mulai.
 
 Soal memiliki `edit_revision` terpisah dari revisi penilaian. Form edit menyertakan
 revisi yang dibaca ketika dibuka. Penyimpanan atau penghapusan berdasarkan revisi

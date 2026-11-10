@@ -296,6 +296,7 @@ async function probeStudentHeartbeat() {
             showToast("Pilihan paket di-reset pengawas. Silakan pilih paket baru.", "info");
             loadQuestions();
         }
+        void refreshPendingGrades();
         return true;
     } catch (error) {
         consecutiveHeartbeatFailures++;
@@ -842,6 +843,41 @@ function showKickModal(message) {
 // ==============================================================================
 // 4. Questions & Navigation (Multi-Category / Package Support)
 // ==============================================================================
+let nextGradeRefresh = 0;
+let gradeRefreshDelay = 12000;
+let gradeRefreshRunning = false;
+
+async function refreshPendingGrades() {
+    const pending = Object.values(submissionsMap).some(sub => {
+        const attempt = sub.latest_attempt;
+        return attempt && !attempt.graded && ['queued', 'running'].includes(attempt.grading_job?.status);
+    });
+    if (!pending) { gradeRefreshDelay = 12000; nextGradeRefresh = 0; return; }
+    if (gradeRefreshRunning || Date.now() < nextGradeRefresh) return;
+    gradeRefreshRunning = true;
+    const previous = submissionsMap;
+    const snapshot = JSON.stringify(previous);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+        const response = await studentFetch('/api/student/questions', {signal: controller.signal});
+        const data = await response.json();
+        if (!handleExamAccessResponse(response, data) || !response.ok || !data.submissions) return;
+        if (submissionsMap !== previous || JSON.stringify(previous) !== snapshot) return;
+        submissionsMap = data.submissions;
+        renderQuestionNav();
+        const question = questionsData[currentQuestionIndex];
+        if (question && submissionsMap[question.id]) renderSubmissionState(question, submissionsMap[question.id]);
+    } catch (error) {
+        console.warn('Status penilaian belum dapat diperbarui:', error);
+    } finally {
+        clearTimeout(timeout);
+        nextGradeRefresh = Date.now() + gradeRefreshDelay;
+        gradeRefreshDelay = Math.min(gradeRefreshDelay * 2, 60000);
+        gradeRefreshRunning = false;
+    }
+}
+
 async function loadQuestions() {
     try {
         const res = await studentFetch("/api/student/questions");

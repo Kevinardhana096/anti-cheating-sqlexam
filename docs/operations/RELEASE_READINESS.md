@@ -52,7 +52,8 @@ Klaim lama “50–80 peserta pasti aman” tidak berlaku. Hasil rinci:
 2. Jalankan regresi lengkap. Ulangi benchmark pada host dan ukuran kelas yang direncanakan.
 3. Periksa `/health` dan `/ready`. Readiness memeriksa skema SQLite serta koneksi admin
    dan mahasiswa pada kedua master; ini bukan bukti kelengkapan semua data soal.
-4. Login kedua pengawas, validasi acuan melalui mulai ujian, dan lakukan simulasi dengan
+4. Login kedua pengawas, jalankan **Validasi Kesiapan Ujian** hingga siap, lalu mulai
+   ujian dan lakukan simulasi dengan
    perangkat mahasiswa pada LAN/Wi-Fi sebenarnya. Pastikan firewall mengizinkan hanya
    jaringan yang dimaksud. Pengaturan TLS/proxy harus mengikuti infrastruktur setempat;
    HTTP lokal sendiri tidak mengenkripsi trafik.

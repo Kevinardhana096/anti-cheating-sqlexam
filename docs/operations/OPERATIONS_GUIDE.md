@@ -24,7 +24,14 @@ Laptop host harus menyala, terhubung daya dan tidak tidur. Mematikan layar berbe
 
 ## Mulai dan pantau
 
-Peserta login dengan NIM dan nama lalu menunggu di lobby. Setelah siap, tekan **Mulai Ujian**. Acuan paket aktif divalidasi; kegagalan tidak membuka akses. Login peserta terlambat saat aktif langsung menuju ujian. Setelah masuk fullscreen, peserta memilih paket sesuai arahan pengawas.
+Jalankan **Validasi Kesiapan Ujian** lebih awal, sebelum peserta mulai mengerjakan.
+Seluruh acuan paket aktif dijalankan, lalu hasil kesiapan disimpan; kegagalan tidak
+membuka akses. Peserta login dengan NIM dan nama lalu menunggu di lobby. Setelah
+status kesiapan **Siap**, tekan **Mulai Ujian** pada waktu yang ditentukan. Tombol
+mulai memeriksa kesiapan tersimpan tanpa menjalankan ulang acuan. Perubahan soal,
+paket aktif, dataset, atau anggaran evaluasi memerlukan validasi ulang. Login peserta
+terlambat saat aktif langsung menuju ujian. Setelah masuk fullscreen, peserta memilih
+paket sesuai arahan pengawas.
 
 Monitoring peserta diperbarui sekitar 10 detik; daftar waiting room pada dashboard sekitar 20 detik. Angka IP sama dapat sah karena NAT bersama (`ALLOW_SHARED_IP=true`). Kepemilikan NIM/perangkat berbeda dari status online. Log fokus/tab berasal dari browser dan perlu interpretasi pengawas; jangan menyimpulkan kecurangan dari satu angka saja.
 
@@ -58,3 +65,11 @@ Aplikasi tidak membaca `.env` otomatis. Atur environment pada terminal yang menj
 Jika akses gagal, periksa service, log, `/ready`, IP/port, firewall dan jalur router. Reset Database mengganti dataset dan bukan perbaikan pool/koneksi. Saat mati listrik, simpan file DB/WAL/SHM yang tersisa dan lakukan diagnosis pada salinan. WAL/NORMAL tidak menjamin nol kehilangan transaksi.
 
 SQLite tetap memiliki satu writer; satu proses aplikasi pun dapat mengalami contention. Rate limiter, pool dan sebagian cache bersifat per proses. Menambah `--workers` melipatgandakan resource dan tidak otomatis meningkatkan kapasitas dengan aman. Sistem belum menyediakan shared rate limiter atau deployment multi-node. Gunakan [panduan pengukuran dan restore](RELEASE_READINESS.md); jangan memakai klaim angka peserta tanpa benchmark dan gladi bersih.
+
+## Pembaruan arsip dan penilaian pending — 10 November 2026
+
+Ekspor CSV memuat baris `NILAI TERBAIK` dan `PERCOBAAN`. Untuk rekap nilai, filter jenis rekaman agar percobaan tidak dijumlahkan sebagai nilai tambahan. Percobaan yang belum dinilai berstatus `BELUM DINILAI` dengan kolom nilai kosong. ZIP menyertakan `arsip_seluruh_percobaan.csv` dan query pending dalam lembar SQL peserta. Rekap nilai terbaik masih dapat berubah sampai antrean selesai.
+
+Browser peserta mengecek hasil antrean lewat heartbeat, dengan jeda meningkat sampai 60 detik. Pembaruan hanya mengganti status jawaban; editor dan pilihan soal tetap dipertahankan. Pengecekan berhenti ketika tidak ada percobaan queued/running. Status review tetap memerlukan pengawas.
+
+Unggahan SQL memerlukan autentikasi dan CSRF sebelum parsing multipart. Body dibatasi selama pembacaan, termasuk tanpa Content-Length, dengan toleransi overhead multipart 256 KiB di atas batas file 25 MiB. Impor PostgreSQL dijalankan melalui threadpool.

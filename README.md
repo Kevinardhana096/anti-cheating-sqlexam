@@ -311,7 +311,7 @@ konflik edit, dan audit tersedia di [ADMIN_SECURITY.md](docs/operations/ADMIN_SE
 2. Arsipkan hasil kelas sebelumnya, selesaikan review, dan buat backup sebelum **Bersihkan Sesi**. Tombol ini menghapus peserta, jawaban dan riwayat terkait kelas sebelumnya.
 3. Dalam status persiapan, atur paket aktif, soal, alias output, kunci dan kebijakan penilaian. Paket dan soal tidak dapat diubah selama ujian aktif.
 4. Gunakan **IDE Pengujian** dan gladi bersih perangkat. Pemeriksaan IDE tidak menggantikan tes transisi lobby/jaringan.
-5. Bagikan URL; peserta login ke ruang tunggu. Tekan **Mulai Ujian** untuk memvalidasi acuan dan membuka akses.
+5. Tekan **Validasi Kesiapan Ujian** lebih awal dan tunggu status **Siap**. Bagikan URL; peserta login ke ruang tunggu. Saat waktunya, tekan **Mulai Ujian** untuk langsung membuka akses tanpa menjalankan ulang acuan.
 6. Pantau peserta dan status jawaban. Pending/review berarti belum ada keputusan nilai; bukan jawaban salah.
 7. Tekan **Hentikan Ujian** saat waktu habis. Pekerjaan penilaian sah yang sudah diterima dapat selesai setelah stop; submit baru ditolak.
 8. Tinjau antrean review, kemudian ekspor hasil dan buat backup. CSV/ZIP bukan pengganti backup layanan lengkap.
@@ -320,7 +320,8 @@ konflik edit, dan audit tersedia di [ADMIN_SECURITY.md](docs/operations/ADMIN_SE
 
 | Tombol | Fungsi |
 |---|---|
-| **Mulai Ujian** | Validasi acuan lalu buka akses; setelah selesai, membuka kembali ujian yang sama |
+| **Validasi Kesiapan Ujian** | Jalankan acuan paket aktif dan simpan hasil kesiapan; akses peserta tetap tertutup |
+| **Mulai Ujian** | Periksa kesiapan tersimpan lalu buka akses; perubahan konfigurasi/dataset memerlukan validasi ulang |
 | **Hentikan Ujian** | Tutup soal/query/submit; pertahankan token dan jawaban |
 | **Hentikan Semua** | Cabut sesi peserta; berbeda dari mengakhiri ujian normal |
 | **Bebaskan Sesi** | Lepas ikatan perangkat dan cabut token lama; jawaban/nilai tetap ada |
@@ -382,6 +383,7 @@ Variabel environment berikut dibaca aplikasi. `.env` tidak dimuat otomatis. Port
 | `PG_STUDENT_PASS` | `student123` | Password login master read-only |
 | `EXAM_SQLITE_PATH` | `exam_system.db` di folder proyek | Lokasi SQLite utama; latihan admin terpisah di sampingnya |
 | `PG_POOL_MAXCONN` | `50` | Batas pool per master per proses; bukan jumlah peserta |
+| `EXAM_GRADE_SECONDS` | `60` | Anggaran detik per evaluasi penilaian dan validasi acuan; lebih dari 0, maksimal 60, perlu restart |
 | `PG_SANDBOX_MAXCONN` | `20` | Batas koneksi sandbox pribadi bersamaan per proses |
 | `ALLOW_SHARED_IP` | `true` | Izinkan beberapa peserta pada IP/NAT yang sama |
 | `TRUSTED_PROXY_CIDRS` | *(kosong)* | IP/CIDR proxy tepercaya untuk membaca `X-Forwarded-For` |

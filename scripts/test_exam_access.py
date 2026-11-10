@@ -20,6 +20,23 @@ from starlette.requests import Request
 
 
 class ExamAccessTests(unittest.TestCase):
+    def test_pending_first_answer_is_in_csv_and_zip(self):
+        import csv, io, zipfile
+        review={**self.grade,'graded':False,'is_correct':None,'score':None,'eval_status':'manual_review'}
+        with patch.object(database,'evaluate_sql_submission',return_value=review):
+            self.assertEqual(self.client.post('/api/student/submit',json=self.payload).status_code,200)
+        rows=list(csv.DictReader(io.StringIO(database.export_all_submissions_csv())))
+        pending=[r for r in rows if r['Jenis Rekaman']=='PERCOBAAN']
+        self.assertEqual(len(pending),1)
+        self.assertEqual(pending[0]['Status Evaluasi'],'BELUM DINILAI')
+        self.assertEqual(pending[0]['Nilai Diperoleh'],'')
+        self.assertEqual(pending[0]['Query Jawaban'],self.payload['query'])
+        with zipfile.ZipFile(io.BytesIO(database.export_submissions_zip_bytes())) as archive:
+            self.assertIn('arsip_seluruh_percobaan.csv',archive.namelist())
+            sql='\n'.join(archive.read(name).decode() for name in archive.namelist() if name.endswith('.sql'))
+            self.assertIn('BELUM DINILAI',sql)
+            self.assertIn(self.payload['query'],sql)
+
     def test_fairness_review_is_stored_without_automatic_zero(self):
         review={**self.grade,'graded':False,'is_correct':None,'score':None,'eval_status':'manual_review'}
         with patch.object(database,'evaluate_sql_submission',return_value=review):
@@ -109,16 +126,32 @@ class ExamAccessTests(unittest.TestCase):
     def test_phase4_start_rejects_invalid_reference_and_keeps_waiting(self):
         database.set_exam_state('waiting')
         with patch('grading_engine.validate_reference', side_effect=ValueError('broken')):
-            result = self.client.post('/api/admin/exam/start')
+            result = self.client.post('/api/admin/exam/validate')
         self.assertEqual(result.status_code, 400)
+        self.assertIn('gagal divalidasi. broken', result.json()['detail'])
+        self.assertIn(f'(ID {self.qid})', result.json()['detail'])
+        self.assertEqual(database.get_exam_state(), 'waiting')
+
+    def test_start_rejects_mixed_select_and_drop_with_actionable_reason(self):
+        database.set_exam_state('waiting')
+        with closing(database.get_sqlite_conn()) as conn, conn:
+            conn.execute("UPDATE questions SET expected_query=?,target_database=? WHERE id=?",
+                         ('SELECT 1; DROP TABLE contoh;', 'sandbox_pribadi', self.qid))
+        result = self.client.post('/api/admin/exam/validate')
+        self.assertEqual(result.status_code, 400)
+        self.assertIn(f'(ID {self.qid})', result.json()['detail'])
+        self.assertIn('Pisahkan acuan perubahan state dan SELECT.', result.json()['detail'])
         self.assertEqual(database.get_exam_state(), 'waiting')
 
     def test_phase4_start_validates_every_active_question(self):
         database.set_exam_state('waiting')
         with patch('grading_engine.validate_reference', return_value={'status':'valid'}) as validate:
-            result = self.client.post('/api/admin/exam/start')
+            result = self.client.post('/api/admin/exam/validate')
         self.assertEqual(result.status_code, 200)
         self.assertGreater(validate.call_count, 0)
+        self.assertEqual(database.get_exam_state(), 'waiting')
+        with patch('grading_engine.validate_reference', side_effect=AssertionError('Start must not run SQL')):
+            self.assertEqual(self.client.post('/api/admin/exam/start').status_code, 200)
         self.assertEqual(database.get_exam_state(), 'active')
 
     def test_phase4_start_detects_configuration_change_during_validation(self):
@@ -128,7 +161,7 @@ class ExamAccessTests(unittest.TestCase):
                 conn.execute('UPDATE questions SET question_revision=question_revision+1 WHERE id=?', (self.qid,))
             return {'status':'valid'}
         with patch('grading_engine.validate_reference', side_effect=validate):
-            result = self.client.post('/api/admin/exam/start')
+            result = self.client.post('/api/admin/exam/validate')
         self.assertEqual(result.status_code, 400)
         self.assertEqual(database.get_exam_state(), 'waiting')
 
@@ -314,7 +347,7 @@ class ExamAccessTests(unittest.TestCase):
 
     def test_admin_controls_reject_student_only_session(self):
         self.client.cookies.delete("admin_session")
-        for url in ("/api/admin/exam/start", "/api/admin/exam/stop", "/api/admin/stop-all-sessions"):
+        for url in ("/api/admin/exam/validate", "/api/admin/exam/start", "/api/admin/exam/stop", "/api/admin/stop-all-sessions"):
             self.assertEqual(self.client.post(url).status_code, 403)
         self.assertEqual(database.get_exam_state(), "active")
 

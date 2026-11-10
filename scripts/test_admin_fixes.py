@@ -23,6 +23,34 @@ from types import SimpleNamespace
 class AdminFixTests(unittest.TestCase):
     setUp=access.ExamAccessTests.setUp
 
+    def test_sql_upload_rejected_before_parser_and_runs_off_event_loop(self):
+        with patch.object(db,'reset_target_database',return_value=(True,'ok')) as reset:
+            response=self.client.post('/api/admin/upload-sql',content=b'bad multipart',
+                headers={'content-type':'multipart/form-data; boundary=x','content-length':str(26*1024*1024)})
+            self.assertEqual(response.status_code,413)
+            reset.assert_not_called()
+            def chunks():
+                yield b'--x\r\nContent-Disposition: form-data; name="file"; filename="big.sql"\r\n\r\n'
+                for _ in range(26):
+                    yield b'x' * (1024*1024)
+                yield b'\r\n--x--\r\n'
+            response=self.client.post('/api/admin/upload-sql',content=chunks(),
+                headers={'content-type':'multipart/form-data; boundary=x'})
+            self.assertEqual(response.status_code,413,response.text)
+            reset.assert_not_called()
+        import asyncio
+        def reset_in_worker(**kwargs):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            return True,'ok'
+        with patch.object(db,'reset_target_database',side_effect=reset_in_worker):
+            response=self.client.post('/api/admin/upload-sql',files={'file':('fixture.sql',b'SELECT 1;')})
+            self.assertEqual(response.status_code,200,response.text)
+        self.client.cookies.delete('admin_session')
+        response=self.client.post('/api/admin/upload-sql',content=b'bad multipart',
+            headers={'content-type':'multipart/form-data; boundary=x'})
+        self.assertEqual(response.status_code,403)
+
     def test_question_validation_reports_sql_field_and_preserves_data(self):
         db.set_exam_state('waiting')
         payload={'question_number':999,'category':'A','title':'Validation test','description':'Validation fixture',
@@ -192,6 +220,7 @@ class AdminFixTests(unittest.TestCase):
         with admin_practice.isolated_store(admin_practice.location(actor)),closing(db.get_sqlite_conn()) as conn:
             before=conn.execute('SELECT id FROM users').fetchone()[0]
         with patch('grading_engine.validate_reference',return_value={'status':'valid'}):
+            self.assertEqual(self.client.post('/api/admin/exam/validate').status_code,200)
             self.assertEqual(self.client.post('/api/admin/exam/start').status_code,200)
         self.assertEqual(self.client.get('/admin/practice').status_code,200)
         with admin_practice.isolated_store(admin_practice.location(actor)),closing(db.get_sqlite_conn()) as conn:

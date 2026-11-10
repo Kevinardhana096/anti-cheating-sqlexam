@@ -230,7 +230,12 @@
 
                                 </div>
 
-                                <button type="button" class="btn btn-success btn-sm" id="btn-exam-start"
+                                <button type="button" class="btn btn-secondary btn-sm" id="btn-exam-validate"
+                                    title="Jalankan acuan soal sebelum membuka ujian">Validasi Kesiapan Ujian</button>
+
+                                <span id="admin-exam-readiness" role="status" aria-live="polite">Memeriksa kesiapan...</span>
+
+                                <button type="button" class="btn btn-success btn-sm" id="btn-exam-start" disabled
 
                                     title="Buka lembar soal untuk semua peserta di waiting room">
 
@@ -1159,7 +1164,7 @@
         </form>
     </div>
 
-    <script src="/static/js/admin.js?v=20261110_validation"></script>
+    <script src="/static/js/admin.js?v=20261110_readiness"></script>
 
 
 

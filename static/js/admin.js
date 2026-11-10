@@ -59,6 +59,11 @@ let packagesList = [];
 let availableCategories = [];
 
 let monitorInterval = null;
+let examStartPending = false;
+let examStateVersion = 0;
+let examValidationPending = false;
+let currentExamState = "waiting";
+let examReadiness = {ready: false, message: "Belum divalidasi."};
 
 
 
@@ -155,6 +160,7 @@ loadWaitingRoomPanel();
     document.getElementById("btn-refresh-monitor")?.addEventListener("click", loadDashboardData);
 
     document.getElementById("btn-exam-start")?.addEventListener("click", startExam);
+    document.getElementById("btn-exam-validate")?.addEventListener("click", validateExamReadiness);
 
     document.getElementById("btn-exam-stop")?.addEventListener("click", stopExam);
 
@@ -344,6 +350,8 @@ function updateWaitingParticipantsList(participants) {
 
 async function loadWaitingRoomPanel() {
 
+    const version = examStateVersion;
+
     try {
 
         const res = await fetch("/api/admin/waiting/participants");
@@ -351,6 +359,8 @@ async function loadWaitingRoomPanel() {
         if (!res.ok) return;
 
         const data = await res.json();
+
+        if (version !== examStateVersion) return;
 
         const participants = data.participants || [];
 
@@ -360,7 +370,10 @@ async function loadWaitingRoomPanel() {
 
         updateWaitingParticipantsList(participants);
 
-        updateExamStateBadge(examState);
+        if (!examStartPending && !examValidationPending) {
+            examReadiness = data.readiness || {ready: false, message: "Muat ulang server untuk memeriksa kesiapan."};
+            updateExamStateBadge(examState);
+        }
 
     } catch (_) {}
 
@@ -369,6 +382,8 @@ async function loadWaitingRoomPanel() {
 
 
 function updateExamStateBadge(state) {
+
+    currentExamState = state;
 
     const badge = document.getElementById("admin-exam-state-badge");
 
@@ -402,21 +417,61 @@ function updateExamStateBadge(state) {
 
         }
 
-        if (startBtn) startBtn.disabled = false;
+        if (startBtn) startBtn.disabled = examStartPending || examValidationPending || !examReadiness.ready;
 
         if (stopBtn) stopBtn.disabled = true;
 
     }
 
+    const validateBtn = document.getElementById("btn-exam-validate");
+    if (validateBtn) validateBtn.disabled = state === "active" || examStartPending || examValidationPending;
+    const readinessLabel = document.getElementById("admin-exam-readiness");
+    if (readinessLabel) {
+        readinessLabel.textContent = examValidationPending ? "Validasi sedang berjalan. Peserta tetap menunggu."
+            : examReadiness.ready ? `Siap (${examReadiness.question_count} soal).` : examReadiness.message;
+    }
 }
 
+
+async function validateExamReadiness() {
+    if (examValidationPending || examStartPending || currentExamState === "active") return;
+    examValidationPending = true;
+    examStateVersion += 1;
+    examReadiness = {ready: false, message: "Belum divalidasi."};
+    const button = document.getElementById("btn-exam-validate");
+    if (button) button.textContent = "Memvalidasi soal...";
+    updateExamStateBadge(currentExamState);
+    try {
+        const response = await fetch("/api/admin/exam/validate", {method: "POST"});
+        const data = await response.json();
+        examReadiness = data.readiness;
+        showToast(data.message, "success");
+    } catch (error) {
+        examReadiness = {ready: false, message: error.message || "Validasi kesiapan gagal."};
+        showToast(examReadiness.message, error.status >= 400 && error.status < 500 ? "warning" : "danger");
+    } finally {
+        examValidationPending = false;
+        examStateVersion += 1;
+        if (button) button.textContent = "Validasi Kesiapan Ujian";
+        updateExamStateBadge(currentExamState);
+        loadWaitingRoomPanel();
+    }
+}
 
 
 async function startExam() {
 
-    const startBtn = document.getElementById("btn-exam-start");
+    if (examStartPending || examValidationPending) return;
+    examStartPending = true;
+    examStateVersion += 1;
 
-    if (startBtn) startBtn.disabled = true;
+    const startBtn = document.getElementById("btn-exam-start");
+    const startLabel = startBtn?.textContent || "Mulai Ujian";
+
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.textContent = "Memulai ujian...";
+    }
 
     try {
 
@@ -429,15 +484,17 @@ async function startExam() {
 
         updateExamStateBadge("active");
 
-        loadWaitingRoomPanel();
+    } catch (error) {
 
-
-    } catch (_) {
-
-        showToast("Gagal memulai ujian.", "danger");
+        showToast(error.message || "Gagal memulai ujian.", error.status >= 400 && error.status < 500 ? "warning" : "danger");
 
         if (startBtn) startBtn.disabled = false;
 
+    } finally {
+        examStartPending = false;
+        examStateVersion += 1;
+        if (startBtn) startBtn.textContent = startLabel;
+        loadWaitingRoomPanel();
     }
 
 }
@@ -447,6 +504,7 @@ async function startExam() {
 async function stopExam() {
 
     if (!confirm("Hentikan ujian? Peserta yang sedang mengerjakan akan dikembalikan ke waiting room.")) return;
+    examStateVersion += 1;
 
     const stopBtn = document.getElementById("btn-exam-stop");
 
@@ -463,14 +521,15 @@ async function stopExam() {
 
         updateExamStateBadge(data.state || "finished");
 
-        loadWaitingRoomPanel();
-
     } catch (_) {
 
         showToast("Gagal menghentikan ujian.", "danger");
 
         if (stopBtn) stopBtn.disabled = false;
 
+    } finally {
+        examStateVersion += 1;
+        loadWaitingRoomPanel();
     }
 
 }

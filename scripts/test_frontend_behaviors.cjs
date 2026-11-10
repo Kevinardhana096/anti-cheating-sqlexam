@@ -164,3 +164,25 @@ test('lobby deduplicates NIM cards while retaining distinct students on a shared
     assert.equal(counter.textContent, 2); assert.equal(cards.length, 2);
     vm.runInContext('renderParticipants(list)', ctx); assert.equal(cards.length, 2);
 });
+
+test('pending grades refresh without replacing editor and stop after completion', async () => {
+    const f = student('SELECT unsaved_draft');
+    f.run('submissionsMap={1:{latest_attempt:{id:3,graded:0,grading_job:{status:"queued"}}}}; renderQuestionNav=()=>{}; renderSubmissionState=()=>{};');
+    f.state.response={ok:true,status:200,json:async()=>({submissions:{1:{score:10,is_correct:1,latest_attempt:{id:3,graded:1}}}})};
+    await f.run('refreshPendingGrades()');
+    assert.equal(f.run('submissionsMap[1].score'),10);
+    assert.equal(f.ctx.cm.value,'SELECT unsaved_draft');
+    await f.run('refreshPendingGrades()');
+    assert.equal(f.state.requests.length,1);
+});
+
+test('grade refresh does not overwrite a newer submit response', async () => {
+    const f = student();
+    f.run('submissionsMap={1:{latest_attempt:{id:3,graded:0,grading_job:{status:"queued"}}}};');
+    f.state.response={ok:true,status:200,json:async()=>{
+        f.run('submissionsMap[1]={score:20,latest_attempt:{id:4,graded:1}}');
+        return {submissions:{1:{score:10,latest_attempt:{id:3,graded:1}}}};
+    }};
+    await f.run('refreshPendingGrades()');
+    assert.equal(f.run('submissionsMap[1].score'),20);
+});

@@ -32,7 +32,7 @@ class StartFailureTests(unittest.TestCase):
                 raise TimeoutError('Test synchronization failed')
             return {'status':'valid'}
         with patch('grading_engine.validate_reference', side_effect=validate), ThreadPoolExecutor(2) as pool:
-            pending = pool.submit(self.client.post, '/api/admin/exam/start')
+            pending = pool.submit(self.client.post, '/api/admin/exam/validate')
             try:
                 self.assertTrue(entered.wait(10))
                 self.assertEqual(second.post('/api/admin/exam/stop').status_code, 200)
@@ -44,16 +44,11 @@ class StartFailureTests(unittest.TestCase):
     def test_two_starts_commit_one_transition(self):
         db.set_exam_state('waiting')
         second = self.admin()
-        barrier = threading.Barrier(2)
-        local = threading.local()
-        def validate(*args):
-            if not getattr(local, 'entered', False):
-                local.entered = True
-                barrier.wait(10)
-            return {'status':'valid'}
-        with patch('grading_engine.validate_reference', side_effect=validate), ThreadPoolExecutor(2) as pool:
+        with patch('grading_engine.validate_reference', return_value={'status':'valid'}):
+            db.validate_exam_readiness()
+        with patch('grading_engine.validate_reference', side_effect=AssertionError('Start must not evaluate')), ThreadPoolExecutor(2) as pool:
             futures = [pool.submit(c.post, '/api/admin/exam/start') for c in (self.client, second)]
-            self.assertEqual(sorted(f.result(15).status_code for f in futures), [200,400])
+            self.assertEqual(sorted(f.result(15).status_code for f in futures), [200,200])
         with closing(db.get_sqlite_conn()) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM exam_logs WHERE action_type='exam_started'").fetchone()[0], 2)  # fixture start plus this transition
         self.assertEqual(db.get_exam_state(), 'active')
@@ -61,7 +56,7 @@ class StartFailureTests(unittest.TestCase):
     def test_postgres_disconnect_during_validation_never_opens_exam(self):
         db.set_exam_state('waiting')
         with patch('grading_engine.validate_reference', side_effect=psycopg2.OperationalError('connection lost')):
-            self.assertEqual(self.client.post('/api/admin/exam/start').status_code,400)
+            self.assertEqual(self.client.post('/api/admin/exam/validate').status_code,400)
         self.assertEqual(db.get_exam_state(),'waiting')
         self.assertEqual(self.client.get('/api/student/questions').status_code,403)
 
@@ -71,9 +66,10 @@ class StartFailureTests(unittest.TestCase):
             pass
         with patch('grading_engine.validate_reference', side_effect=SimulatedProcessExit):
             with self.assertRaises(SimulatedProcessExit):
-                db.start_exam_validated()
+                db.validate_exam_readiness()
         self.assertEqual(db.get_exam_state(),'waiting')
         with patch('grading_engine.validate_reference',return_value={'status':'valid'}):
+            db.validate_exam_readiness()
             db.start_exam_validated()
         self.assertEqual(db.get_exam_state(),'active')
 
@@ -88,6 +84,7 @@ class StartFailureTests(unittest.TestCase):
             self.assertEqual(c.get('/api/exam/state').json()['state'],'waiting')
             clients.append(c)
         with patch('grading_engine.validate_reference',return_value={'status':'valid'}):
+            self.assertEqual(self.client.post('/api/admin/exam/validate').status_code,200)
             self.assertEqual(self.client.post('/api/admin/exam/start').status_code,200)
         def enter(c):
             self.assertEqual(c.get('/api/exam/state').json()['state'],'active')
@@ -113,6 +110,7 @@ class StartFailureTests(unittest.TestCase):
             original(conn,state)
             raise RuntimeError('Injected failure before transaction commit')
         with patch('grading_engine.validate_reference',return_value={'status':'valid'}), patch.object(db,'_set_exam_state',side_effect=fail):
+            db.validate_exam_readiness()
             with self.assertRaises(RuntimeError):
                 db.start_exam_validated()
         self.assertEqual(db.get_exam_state(),'waiting')
@@ -143,6 +141,7 @@ class StartFailureTests(unittest.TestCase):
     def test_cleared_previous_session_cannot_enter_new_exam(self):
         self.assertEqual(self.client.post('/api/admin/clear-sessions',json={'clear_logs':False}).status_code,200)
         with patch('grading_engine.validate_reference',return_value={'status':'valid'}):
+            self.assertEqual(self.client.post('/api/admin/exam/validate').status_code,200)
             self.assertEqual(self.client.post('/api/admin/exam/start').status_code,200)
         for url in ('/api/student/questions','/api/exam/state'):
             self.assertEqual(self.client.get(url).status_code,401)
