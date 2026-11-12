@@ -85,15 +85,20 @@ async def add_no_cache_headers(request: Request, call_next):
     except HTTPException as error:
         return JSONResponse(status_code=error.status_code, content={"detail":error.detail})
     exceeded=False
-    if request.url.path in {'/api/admin/questions/upload-image','/api/admin/questions/upload-images'}:
+    if request.url.path in {'/api/admin/questions/upload-image','/api/admin/questions/upload-images','/api/admin/upload-sql'}:
+        try:
+            if not await asyncio.to_thread(verify_admin_auth, request):
+                return JSONResponse(status_code=403, content={'detail':'Akses ditolak'})
+        except HTTPException as error:
+            return JSONResponse(status_code=error.status_code, content={'detail':error.detail})
         import question_uploads
-        budget=question_uploads.MAX_BATCH_BYTES+256*1024
+        budget=(25*1024*1024 if request.url.path == '/api/admin/upload-sql' else question_uploads.MAX_BATCH_BYTES)+256*1024
         try:
             length=int(request.headers.get('content-length','0'))
         except ValueError:
             return JSONResponse(status_code=400,content={'detail':'Content-Length tidak valid.'})
         if length>budget or length<0:
-            return JSONResponse(status_code=413,content={'detail':'Ukuran permintaan gambar melebihi batas.'})
+            return JSONResponse(status_code=413,content={'detail':'Ukuran permintaan unggahan melebihi batas.'})
         receive=request._receive
         received=0
         async def bounded_receive():
@@ -102,12 +107,12 @@ async def add_no_cache_headers(request: Request, call_next):
             received+=len(message.get('body',b''))
             if received>budget:
                 exceeded=True
-                raise HTTPException(status_code=413,detail='Ukuran permintaan gambar melebihi batas.')
+                raise HTTPException(status_code=413,detail='Ukuran permintaan unggahan melebihi batas.')
             return message
         request._receive=bounded_receive
     response = await call_next(request)
     if exceeded:
-        response=JSONResponse(status_code=413,content={'detail':'Ukuran permintaan gambar melebihi batas.'})
+        response=JSONResponse(status_code=413,content={'detail':'Ukuran permintaan unggahan melebihi batas.'})
     if request.url.path.startswith('/static/uploads/questions/'):
         response.headers['Content-Security-Policy']="sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:"
         response.headers['X-Content-Type-Options']='nosniff'
@@ -668,7 +673,7 @@ def api_student_submit(req: SubmitAnswerRequest, request: Request):
             if score_retained else ""
         ),
         "eval_status": eval_res["eval_status"],
-        "feedback": ("Jawaban tersimpan dan mengantre penilaian otomatis. Muat ulang soal untuk melihat hasil terbaru."
+        "feedback": ("Jawaban tersimpan dan mengantre penilaian otomatis. Hasil akan diperbarui otomatis."
                      if save_res["queue_status"] == "queued" else eval_res["feedback"]),
         "target_database": target_database,
         "active_database": active_database,
@@ -1249,6 +1254,17 @@ def api_admin_exam_start(request: Request):
         raise HTTPException(status_code=400, detail=str(error))
     return {"status": "success", "message": "Ujian dimulai. Seluruh peserta akan diarahkan ke lembar soal."}
 
+
+@app.post("/api/admin/exam/validate")
+def api_admin_exam_validate(request: Request):
+    if not verify_admin_auth(request):
+        raise HTTPException(status_code=403, detail="Akses ditolak.")
+    try:
+        readiness = database.validate_exam_readiness()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"status": "success", "message": "Validasi kesiapan selesai. Ujian siap dimulai.", "readiness": readiness}
+
 @app.post("/api/admin/exam/stop")
 def api_admin_exam_stop(request: Request):
     if not verify_admin_auth(request):
@@ -1275,7 +1291,8 @@ def api_admin_waiting_participants(request: Request):
         raise HTTPException(status_code=403, detail="Akses ditolak.")
     participants = database.get_waiting_room_participants()
     exam_state = database.get_exam_state()
-    return {"participants": participants, "count": len(participants), "exam_state": exam_state}
+    return {"participants": participants, "count": len(participants), "exam_state": exam_state,
+            "readiness": database.get_exam_readiness()}
 
 
 
@@ -1360,7 +1377,7 @@ async def api_admin_upload_sql(
     db_choice = (target_db or "classicmodels").strip().lower()
     if db_choice not in database.ALLOWED_MASTER_DBS:
         raise HTTPException(status_code=400, detail="Target database tidak valid.")
-    success, msg = database.reset_target_database(target_db=db_choice, custom_sql_text=sql_text)
+    success, msg = await asyncio.to_thread(database.reset_target_database, target_db=db_choice, custom_sql_text=sql_text)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     database.log_exam_event(None, "upload_sql", f"Pengawas mengunggah custom dump SQL ke database '{db_choice}' ({len(sql_text)} karakter).")

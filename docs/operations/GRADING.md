@@ -94,10 +94,14 @@ perintah UPDATE/DELETE yang diminta, termasuk ketika perubahan acuannya tidak me
 
 ## Validasi dan status tertunda
 
-Tombol mulai ujian memvalidasi seluruh acuan dalam paket aktif. Acuan kosong pada mode
+Tombol **Validasi Kesiapan Ujian** memvalidasi seluruh acuan dalam paket aktif sebelum
+waktu mulai ujian, tanpa membuka akses mahasiswa. Acuan kosong pada mode
 otomatis, acuan yang tidak dapat dieksekusi, prasyarat tidak lengkap, atau hasil yang
 melewati batas menghalangi ujian dimulai. Mode manual harus dipilih eksplisit.
-Revisi konfigurasi diperiksa kembali dalam transaksi sebelum status menjadi aktif.
+Hasil kesiapan disimpan di SQLite beserta sidik konfigurasi dan waktu validasi.
+Tombol **Mulai Ujian** hanya memeriksa bahwa hasil tersebut masih berlaku dalam
+transaksi sebelum status menjadi aktif; SQL acuan tidak dijalankan ulang.
+Perubahan soal, paket aktif, dataset, atau anggaran evaluasi membatalkan kesiapan.
 Penyimpanan perubahan soal ditolak selama ujian aktif.
 
 `reference_error`, `evaluation_error`, `evaluation_limit`, dan `manual_review`
@@ -108,7 +112,7 @@ pernah memberi poin otomatis.
 
 | Batas evaluator | Nilai |
 |---|---|
-| Anggaran evaluasi SQL/perbandingan | 10 detik |
+| Anggaran evaluasi SQL/perbandingan | 60 detik, diatur melalui `EXAM_GRADE_SECONDS` |
 | Slot evaluasi per proses | 4 |
 | Baris hasil lengkap | 100.000 per sisi per perbandingan |
 | Ukuran hasil lengkap | 32 MiB per sisi dalam encoding pembanding |
@@ -116,6 +120,16 @@ pernah memberi poin otomatis.
 | Matching permutasi dengan toleransi, termasuk kelompok seri | 1.000 |
 | Tabel snapshot | 64 |
 | Baris terpengaruh per statement mutasi | 10.000 |
+
+`EXAM_GRADE_SECONDS` berlaku untuk validasi acuan sebelum ujian dan penilaian
+jawaban mahasiswa, termasuk simulasi admin. Nilainya harus lebih dari 0 dan maksimal
+60 detik agar tetap berada di bawah lease pekerjaan penilaian 90 detik.
+Untuk memakai 60 detik di PowerShell, jalankan `$env:EXAM_GRADE_SECONDS="60"`
+sebelum `./run.bat`. Di macOS/Linux, jalankan `EXAM_GRADE_SECONDS=60 bash run.sh`.
+Restart server setelah mengubah nilai. Aplikasi tidak memuat `.env` otomatis.
+Anggaran ini berlaku untuk satu evaluasi, bukan per statement SQL. Run Query
+di IDE mahasiswa dan simulasi admin memiliki batas terpisah sebesar 60 detik untuk
+seluruh skrip. Mengubah `EXAM_GRADE_SECONDS` tidak mengubah batas Run Query tersebut.
 
 Batas terlampaui menghasilkan penilaian tertunda, bukan perbandingan fallback pada
 preview. Provisioning, koneksi, dan cleanup dapat menambah durasi respons. Batas ini

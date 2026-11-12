@@ -91,6 +91,9 @@ def run(students, workers, burst_workers, automatic_drain=False):
                 if response.status_code!=303:
                     raise RuntimeError('Fixture admin login failed.')
                 admin.headers['X-CSRF-Token'] = admin.get('/api/admin/session').json()['csrf_token']
+                response = admin.post('/api/admin/exam/validate')
+                if response.status_code!=200:
+                    raise RuntimeError('Fixture reference validation failed.')
                 response = admin.post('/api/admin/exam/start')
                 if response.status_code!=200:
                     raise RuntimeError('Fixture reference validation/start failed.')

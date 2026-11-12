@@ -43,6 +43,7 @@ def main():
         ("Diff whitespace", ["git", "diff", "--check"]),
         ("Fresh installation and legacy migrations", [py, "scripts/test_system_migrations.py"]),
         ("Exam access and session lifecycle", [py, "scripts/test_exam_access.py"]),
+        ("Prepared exam readiness and invalidation", [py, "scripts/test_exam_readiness.py"]),
         ("Exam start races and lost-response recovery", [py, "scripts/test_exam_start_failures.py"]),
         ("Admin sessions, CSRF, credentials, and telemetry", [py, "scripts/test_admin_security.py"]),
         ("Admin practice and student IDE isolation", [py, "scripts/test_admin_practice.py"]),

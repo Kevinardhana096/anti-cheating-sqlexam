@@ -13,6 +13,15 @@ menetapkan `finished`. Menekan Mulai Ujian setelah selesai membuka kembali ujian
 sama dan mempertahankan jawaban. **Bersihkan Sesi** menghapus peserta/jawaban kelas
 sebelumnya sekaligus mengembalikan status ke `waiting` dalam satu transaksi.
 
+Sebelum mulai, tekan **Validasi Kesiapan Ujian** (`POST /api/admin/exam/validate`).
+Proses ini menjalankan seluruh acuan paket aktif dan menyimpan hasil kesiapan tanpa
+membuka ujian. `POST /api/admin/exam/start` menolak jika hasil belum ada atau sudah
+tidak berlaku. Perubahan kunci, prasyarat, kebijakan penilaian, revisi soal, susunan
+paket aktif, revisi dataset, atau anggaran evaluator memerlukan validasi ulang.
+Tombol mulai tidak menjalankan SQL acuan. Hasil kesiapan tersimpan tetap dapat dipakai
+setelah restart server atau oleh admin lain, selama konfigurasi masih sama.
+Validasi ulang saat ujian aktif ditolak agar sesi yang berjalan tidak terganggu.
+
 Soal dan pemilihan paket hanya tersedia setelah ujian dimulai. Query, submit, dan
 metadata database memerlukan paket aktif yang sudah dipilih. Paket kosong atau nonaktif
 tidak ditawarkan; pemilihan langsung melalui API juga ditolak. Submit harus merujuk

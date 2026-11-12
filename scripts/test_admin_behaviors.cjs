@@ -32,6 +32,119 @@ test('invalid question SQL displays validation reason and keeps the form',async(
  assert.equal(e.get('modal-q-expected').value,'random words');
  assert.equal(e.get('question-modal').style.display,'flex');
 });
+test('exam start rejection displays the question reason and allows retry',async()=>{
+ const e=environment();
+ const reason='Acuan soal B nomor 3 (ID 2610) gagal divalidasi. Pisahkan acuan perubahan state dan SELECT.';
+ e.get('admin-exam-state-badge').textContent='Menunggu';
+ e.ctx.network=async()=>({ok:false,status:400,json:async()=>({detail:reason})});
+ await e.run('startExam()');
+ assert.deepEqual(e.ctx.toasts.at(-1),[reason,'warning']);
+ assert.equal(e.get('btn-exam-start').disabled,false);
+ assert.equal(e.get('admin-exam-state-badge').textContent,'Menunggu');
+ assert.ok(!e.ctx.toasts.some(t=>t[1]==='success'));
+});
+
+test('exam start network failure allows retry',async()=>{
+ const e=environment();
+ e.ctx.network=async()=>{throw new TypeError('Failed to fetch')};
+ await e.run('startExam()');
+ assert.deepEqual(e.ctx.toasts.at(-1),['Failed to fetch','danger']);
+ assert.equal(e.get('btn-exam-start').disabled,false);
+});
+
+test('waiting room polling cannot re-enable start during a pending request',async()=>{
+ const e=environment();let finish,posts=0,state='waiting';
+ e.get('btn-exam-start').textContent='Mulai Ujian';
+ e.ctx.updateWaitingParticipantsList=()=>{};
+ e.ctx.network=async(url,options)=>{
+  if(options?.method==='POST'){
+   posts++;
+   return new Promise(resolve=>{finish=resolve});
+  }
+  return {ok:true,json:async()=>({exam_state:state,participants:[]})};
+ };
+ const starting=e.run('startExam()');
+ await e.run('loadWaitingRoomPanel()');
+ await e.run('startExam()');
+ assert.equal(posts,1);
+ assert.equal(e.get('btn-exam-start').disabled,true);
+ assert.equal(e.get('btn-exam-start').textContent,'Memulai ujian...');
+ state='active';
+ finish({ok:true,json:async()=>({message:'Ujian dimulai.'})});
+ await starting;
+ assert.equal(e.get('admin-exam-state-badge').textContent,'Aktif');
+ assert.equal(e.get('btn-exam-start').textContent,'Mulai Ujian');
+ assert.equal(e.get('btn-exam-start').disabled,true);
+});
+
+test('poll JSON from before start cannot restore the waiting state',async()=>{
+ const e=environment();let reads=0,finishOld,entered;
+ const reading=new Promise(resolve=>{entered=resolve});
+ e.ctx.updateWaitingParticipantsList=()=>{};
+ e.ctx.network=async(url,options)=>{
+  if(options?.method==='POST')return {ok:true,json:async()=>({message:'Ujian dimulai.'})};
+  if(++reads===1)return {ok:true,json:()=>{
+   entered();return new Promise(resolve=>{finishOld=resolve});
+  }};
+  return {ok:true,json:async()=>({exam_state:'active',participants:[]})};
+ };
+ const old=e.run('loadWaitingRoomPanel()');
+ await reading;
+ await e.run('startExam()');
+ finishOld({exam_state:'waiting',participants:[]});
+ await old;
+ assert.equal(e.get('admin-exam-state-badge').textContent,'Aktif');
+ assert.equal(e.get('btn-exam-start').disabled,true);
+ assert.equal(e.get('btn-exam-stop').disabled,false);
+});
+
+test('preflight runs separately, keeps waiting and enables start only when ready',async()=>{
+ const e=environment();let finish,posted=[];
+ const ready={ready:true,question_count:20,message:'Siap'};
+ e.ctx.updateWaitingParticipantsList=()=>{};
+ e.ctx.network=async(url,options)=>{
+  if(options?.method==='POST'){
+   posted.push(url);
+   return new Promise(resolve=>{finish=resolve});
+  }
+  return {ok:true,json:async()=>({exam_state:'waiting',participants:[],readiness:ready})};
+ };
+ const validating=e.run('validateExamReadiness()');
+ await e.run('loadWaitingRoomPanel()');
+ await e.run('startExam()');
+ assert.equal(e.get('btn-exam-start').disabled,true);
+ assert.equal(e.get('btn-exam-validate').disabled,true);
+ assert.equal(e.get('btn-exam-validate').textContent,'Memvalidasi soal...');
+ assert.deepEqual(posted,['/api/admin/exam/validate']);
+ finish({ok:true,json:async()=>({message:'Siap dimulai',readiness:ready})});
+ await validating;
+ assert.equal(e.get('admin-exam-state-badge').textContent,'Menunggu');
+ assert.equal(e.get('admin-exam-readiness').textContent,'Siap (20 soal).');
+ assert.equal(e.get('btn-exam-start').disabled,false);
+ assert.equal(e.get('btn-exam-validate').textContent,'Validasi Kesiapan Ujian');
+});
+
+test('invalidated readiness disables start until preparation is repeated',async()=>{
+ const e=environment();
+ e.ctx.updateWaitingParticipantsList=()=>{};
+ e.ctx.network=async()=>({ok:true,json:async()=>({exam_state:'waiting',participants:[],
+  readiness:{ready:false,message:'Dataset berubah. Validasi kesiapan ulang.'}})});
+ await e.run('loadWaitingRoomPanel()');
+ assert.equal(e.get('btn-exam-start').disabled,true);
+ assert.equal(e.get('btn-exam-validate').disabled,false);
+ assert.equal(e.get('admin-exam-readiness').textContent,'Dataset berubah. Validasi kesiapan ulang.');
+});
+
+test('preflight failure displays the reason and leaves exam closed',async()=>{
+ const e=environment();
+ e.ctx.network=async()=>({ok:false,status:400,json:async()=>({detail:'Acuan soal B nomor 3 gagal divalidasi.'})});
+ await e.run('validateExamReadiness()');
+ assert.deepEqual(e.ctx.toasts.at(-1),['Acuan soal B nomor 3 gagal divalidasi.','warning']);
+ assert.equal(e.get('btn-exam-start').disabled,true);
+ assert.equal(e.get('admin-exam-state-badge').textContent,'Menunggu');
+ assert.equal(e.get('btn-exam-validate').disabled,false);
+});
+
 test('gallery navigation rejects executable URLs and removes opener access',()=>{
  const e=environment(),opened=[];
  e.ctx.open=(...args)=>opened.push(args);

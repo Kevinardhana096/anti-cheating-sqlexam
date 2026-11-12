@@ -2,6 +2,8 @@
 
 from contextlib import ExitStack, closing
 import json
+import math
+import os
 import threading
 import time
 
@@ -14,7 +16,9 @@ from grading_workspace import Workspace, clone_workspace, signature
 from query_runner import _cell, MAX_RESPONSE_BYTES
 from sql_policy import prepare_sql, SQLPolicyError, ParseError, _walk, NON_REPLAYABLE_FUNCTIONS
 
-GRADE_SECONDS = 10.0
+GRADE_SECONDS = float(os.environ.get("EXAM_GRADE_SECONDS", "60"))
+if not math.isfinite(GRADE_SECONDS) or not 0 < GRADE_SECONDS <= 60:
+    raise ValueError("EXAM_GRADE_SECONDS harus lebih dari 0 dan maksimal 60 detik.")
 _slots = threading.BoundedSemaphore(4)
 
 

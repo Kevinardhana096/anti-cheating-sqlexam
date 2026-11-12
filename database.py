@@ -2147,7 +2147,15 @@ def export_all_submissions_csv() -> str:
         ORDER BY u.nim ASC, q.question_number ASC;
         """
     )
-    rows = cur.fetchall()
+    rows = [dict(row) for row in cur.fetchall()]
+    import grading_queue
+    attempts = conn.execute('''SELECT a.*, u.nim, u.name, u.ip_address,
+        q.question_number, q.title AS question_title, q.score_weight
+        FROM submission_attempts a JOIN users u ON u.id=a.user_id
+        JOIN questions q ON q.id=a.question_id ORDER BY u.nim,q.question_number,a.id''').fetchall()
+    for attempt in attempts:
+        effective = grading_queue.effective_attempt(conn, attempt)
+        rows.append({**dict(attempt), **effective, 'archive_kind': 'PERCOBAAN'})
     conn.close()
 
     output = io.StringIO()
@@ -2156,16 +2164,18 @@ def export_all_submissions_csv() -> str:
         "NIM", "Nama Mahasiswa", "IP Address",
         "Nomor Soal", "Judul Soal", "Bobot Nilai",
         "Nilai Diperoleh", "Status Evaluasi",
-        "Query Jawaban", "Waktu Submit"
+        "Query Jawaban", "Waktu Submit", "Jenis Rekaman", "ID Percobaan"
     ])
     for r in rows:
-        status_text = "BENAR" if r["is_correct"] else "BELUM TEPAT"
-        awarded_score = r["score"] if r["score"] is not None else 0
+        pending = not r.get('graded', r['score'] is not None)
+        status_text = "BELUM DINILAI" if pending else ("BENAR" if r["is_correct"] else "BELUM TEPAT")
+        awarded_score = "" if pending else r["score"]
         writer.writerow([
             r["nim"], r["name"], r["ip_address"],
             r["question_number"], r["question_title"], r["score_weight"],
             awarded_score, status_text,
-            r["submitted_query"], r["submitted_at"]
+            r["submitted_query"], r["submitted_at"], r.get('archive_kind', 'NILAI TERBAIK'),
+            r.get('id', '')
         ])
     return output.getvalue()
 
@@ -2181,6 +2191,7 @@ def export_submissions_zip_bytes() -> bytes:
     summary_rows = []
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr('arsip_seluruh_percobaan.csv', export_all_submissions_csv().encode('utf-8-sig'))
         for u in users:
             user_id = u["id"]
             nim = u["nim"]
@@ -2211,6 +2222,14 @@ def export_submissions_zip_bytes() -> bytes:
                 )
                 q_rows = cur.fetchall()
 
+            q_rows = [dict(row) for row in q_rows]
+            for qr in q_rows:
+                if qr['submitted_query'] is None:
+                    latest = conn.execute('''SELECT a.* FROM submission_attempts a JOIN questions q ON q.id=a.question_id
+                        WHERE a.user_id=? AND q.question_number=? AND q.category=? ORDER BY a.id DESC LIMIT 1''',
+                        (user_id, qr['question_number'], category)).fetchone()
+                    if latest:
+                        qr.update(submitted_query=latest['submitted_query'], submitted_at=latest['submitted_at'], pending=True)
             user_total_score = sum((qr["score"] or 0) for qr in q_rows)
             user_max_score = sum((qr["score_weight"] or 0) for qr in q_rows)
             user_correct_count = sum(1 for qr in q_rows if qr["is_correct"])
@@ -2247,8 +2266,8 @@ def export_submissions_zip_bytes() -> bytes:
                 q_weight = qr["score_weight"]
                 ans = qr["submitted_query"] or "-- BELUM DIJAWAB"
                 submit_time = qr["submitted_at"] or "-"
-                score = qr["score"] if qr["score"] is not None else 0
-                status_label = "BENAR" if qr["is_correct"] else ("BELUM TEPAT" if qr["submitted_query"] else "BELUM DIJAWAB")
+                score = 'Belum dinilai' if qr.get('pending') else (qr["score"] if qr["score"] is not None else 0)
+                status_label = 'BELUM DINILAI' if qr.get('pending') else ("BENAR" if qr["is_correct"] else ("BELUM TEPAT" if qr["submitted_query"] else "BELUM DIJAWAB"))
 
                 file_content.append(f"-- ------------------------------------------------------------")
                 file_content.append(f"-- SOAL NO. {q_num}: {q_title} (Bobot: {q_weight} | Nilai Diperoleh: {score} | Status: {status_label})")
@@ -2260,6 +2279,16 @@ def export_submissions_zip_bytes() -> bytes:
                     clean_ans += ";"
                 file_content.append(f"{clean_ans}\n")
 
+            import grading_queue
+            for attempt in conn.execute('SELECT * FROM submission_attempts WHERE user_id=? ORDER BY id', (user_id,)):
+                effective = grading_queue.effective_attempt(conn, attempt)
+                if not effective['graded']:
+                    file_content.extend([
+                        f"-- PERCOBAAN {attempt['id']} | ID SOAL {attempt['question_id']} | BELUM DINILAI | Nilai: belum tersedia",
+                        f"-- Waktu Submit: {attempt['submitted_at']}",
+                        attempt['submitted_query'],
+                        "\n",
+                    ])
             sql_data = "\n".join(file_content)
             safe_nim = re.sub(r'[^a-zA-Z0-9_-]', '_', nim)
             if safe_nim != nim:
@@ -4113,37 +4142,100 @@ def set_exam_state(state: str) -> None:
         _set_exam_state(conn, state)
 
 
-def start_exam_validated():
+def _exam_readiness_snapshot(conn):
+    import grading_queue
+    from grading_engine import GRADE_SECONDS
+    questions = [dict(row) for row in conn.execute("SELECT q.* FROM questions q JOIN exam_packages p ON UPPER(p.code)=UPPER(q.category) WHERE p.is_active=1 ORDER BY q.category,q.question_number,q.id")]
+    packages = [row[0] for row in conn.execute("SELECT code FROM exam_packages WHERE is_active=1 ORDER BY code")]
+    fields = ("id", "question_revision", "edit_revision", "category", "question_number", "expected_query",
+              "target_database", "grading_policy", "setup_query", "score_weight")
+    manifest = {"version": 1, "budget": GRADE_SECONDS, "packages": packages,
+                "server": [PG_HOST, PG_PORT, DEFAULT_EXAM_DB],
+                "dataset": grading_queue.setting(conn, "dataset_revision"),
+                "questions": [[q[field] for field in fields] for q in questions]}
+    fingerprint = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    return questions, fingerprint
+
+
+def _exam_readiness(conn):
+    import grading_queue
+    questions, fingerprint = _exam_readiness_snapshot(conn)
+    result = {"ready": False, "question_count": len(questions), "validated_at": None,
+              "message": "Jalankan Validasi Kesiapan Ujian sebelum memulai."}
+    if grading_queue.setting(conn, "grading_maintenance", ""):
+        result["message"] = "Dataset sedang dipelihara; validasi ulang setelah selesai."
+        return result
+    if not questions:
+        result["message"] = "Belum ada soal dalam paket aktif."
+        return result
+    try:
+        saved = json.loads(grading_queue.setting(conn, "exam_readiness", "null"))
+    except (ValueError, TypeError):
+        saved = None
+    if isinstance(saved, dict) and saved.get("fingerprint") == fingerprint:
+        result.update(ready=True, validated_at=saved.get("validated_at"),
+                      message="Soal siap. Ujian dapat dimulai tanpa menjalankan ulang acuan.")
+    elif saved:
+        result["message"] = "Konfigurasi soal, paket, atau dataset berubah. Validasi kesiapan ulang."
+    return result
+
+
+def get_exam_readiness():
+    with closing(get_sqlite_conn()) as conn:
+        conn.execute("BEGIN")
+        return _exam_readiness(conn)
+
+
+def validate_exam_readiness():
     from grading_engine import validate_reference
     import grading_queue
-    with closing(get_sqlite_conn()) as conn:
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
         if grading_queue.setting(conn,"grading_maintenance",""):
-            raise ValueError("Dataset sedang dipelihara; ujian belum dapat dimulai.")
-        dataset_revision = grading_queue.setting(conn,"dataset_revision")
+            raise ValueError("Dataset sedang dipelihara; validasi belum dapat dijalankan.")
         state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
         if state and state[0] == "active":
-            return
+            raise ValueError("Ujian sedang aktif. Validasi kesiapan dilakukan sebelum ujian dimulai.")
         revision = conn.execute("SELECT value FROM system_settings WHERE key='exam_revision'").fetchone()
         revision = revision[0] if revision else None
-        questions = [dict(row) for row in conn.execute("SELECT q.* FROM questions q JOIN exam_packages p ON UPPER(p.code)=UPPER(q.category) WHERE p.is_active=1 ORDER BY q.category,q.question_number,q.id")]
+        questions, fingerprint = _exam_readiness_snapshot(conn)
+        conn.execute("DELETE FROM system_settings WHERE key='exam_readiness'")
     if not questions:
         raise ValueError("Belum ada soal dalam paket aktif.")
-    manifest = [(q["id"], q["question_revision"]) for q in questions]
     validations = []
     for q in questions:
         try:
             result = validate_reference(q["expected_query"], q["target_database"], q["grading_policy"], q["setup_query"], q["id"])
             validations.append((result["status"], q["id"]))
         except Exception as error:
-            raise ValueError(f"Acuan soal {q['category']} nomor {q['question_number']} (ID {q['id']}) gagal divalidasi. Periksa acuan, prasyarat, dan batas evaluator.") from error
+            reason = "Periksa acuan, prasyarat, dan batas evaluator."
+            if isinstance(error, ValueError):
+                reason = " ".join(str(error).split())[:300] or reason
+            raise ValueError(f"Acuan soal {q['category']} nomor {q['question_number']} (ID {q['id']}) gagal divalidasi. {reason}") from error
     with closing(get_sqlite_conn()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         current_revision = conn.execute("SELECT value FROM system_settings WHERE key='exam_revision'").fetchone()
-        current_manifest = [tuple(row) for row in conn.execute("SELECT q.id,q.question_revision FROM questions q JOIN exam_packages p ON UPPER(p.code)=UPPER(q.category) WHERE p.is_active=1 ORDER BY q.category,q.question_number,q.id")]
-        if (grading_queue.setting(conn,"grading_maintenance","") or grading_queue.setting(conn,"dataset_revision") != dataset_revision
-                or (current_revision[0] if current_revision else None) != revision or current_manifest != manifest):
-            raise ValueError("Konfigurasi ujian berubah selama validasi. Mulai kembali setelah perubahan selesai.")
+        _, current_fingerprint = _exam_readiness_snapshot(conn)
+        if (grading_queue.setting(conn,"grading_maintenance","")
+                or (current_revision[0] if current_revision else None) != revision or current_fingerprint != fingerprint):
+            raise ValueError("Konfigurasi atau status ujian berubah selama validasi. Validasi kesiapan ulang.")
         conn.executemany("UPDATE questions SET reference_validation=? WHERE id=?", validations)
+        saved = {"fingerprint": fingerprint, "validated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        conn.execute("INSERT INTO system_settings(key,value) VALUES('exam_readiness',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(saved),))
+        conn.execute("INSERT INTO exam_logs(action_type,details) VALUES('exam_validated',?)",
+                     (f"Kesiapan {len(questions)} soal pada paket aktif berhasil divalidasi.",))
+        return _exam_readiness(conn)
+
+
+def start_exam_validated():
+    with closing(get_sqlite_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        state = conn.execute("SELECT value FROM system_settings WHERE key='exam_state'").fetchone()
+        if state and state[0] == "active":
+            return
+        readiness = _exam_readiness(conn)
+        if not readiness["ready"]:
+            raise ValueError(readiness["message"])
         _set_exam_state(conn, "active")
 
 

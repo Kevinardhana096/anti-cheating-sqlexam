@@ -564,6 +564,12 @@
 
                 <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
 
+                    <label style="display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap;"
+                        title="Tampilkan saran SQL saat mengetik. Ctrl+Space membuka saran secara manual.">
+                        <input type="checkbox" id="sql-auto-suggestions" role="switch" checked>
+                        Saran otomatis
+                    </label>
+
                     <button type="button" class="btn btn-secondary btn-sm" id="btn-format-sql"
 
                         title="Rapikan kata kunci query (atau bagian yang diblok)">
@@ -939,7 +945,7 @@
     <script src="/static/vendor/codemirror/addon/hint/sql-hint.js"></script>
 
     <script src="/static/vendor/sql-formatter/sql-formatter.min.js?v=15.9.0"></script>
-    <script src="/static/js/student.js?v=20261108_practice"></script>
+    <script src="/static/js/student.js?v=20261112_suggestions"></script>
 
 
 

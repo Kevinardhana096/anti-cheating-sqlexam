@@ -311,7 +311,7 @@ konflik edit, dan audit tersedia di [ADMIN_SECURITY.md](docs/operations/ADMIN_SE
 2. Arsipkan hasil kelas sebelumnya, selesaikan review, dan buat backup sebelum **Bersihkan Sesi**. Tombol ini menghapus peserta, jawaban dan riwayat terkait kelas sebelumnya.
 3. Dalam status persiapan, atur paket aktif, soal, alias output, kunci dan kebijakan penilaian. Paket dan soal tidak dapat diubah selama ujian aktif.
 4. Gunakan **IDE Pengujian** dan gladi bersih perangkat. Pemeriksaan IDE tidak menggantikan tes transisi lobby/jaringan.
-5. Bagikan URL; peserta login ke ruang tunggu. Tekan **Mulai Ujian** untuk memvalidasi acuan dan membuka akses.
+5. Tekan **Validasi Kesiapan Ujian** lebih awal dan tunggu status **Siap**. Bagikan URL; peserta login ke ruang tunggu. Saat waktunya, tekan **Mulai Ujian** untuk langsung membuka akses tanpa menjalankan ulang acuan.
 6. Pantau peserta dan status jawaban. Pending/review berarti belum ada keputusan nilai; bukan jawaban salah.
 7. Tekan **Hentikan Ujian** saat waktu habis. Pekerjaan penilaian sah yang sudah diterima dapat selesai setelah stop; submit baru ditolak.
 8. Tinjau antrean review, kemudian ekspor hasil dan buat backup. CSV/ZIP bukan pengganti backup layanan lengkap.
@@ -320,7 +320,8 @@ konflik edit, dan audit tersedia di [ADMIN_SECURITY.md](docs/operations/ADMIN_SE
 
 | Tombol | Fungsi |
 |---|---|
-| **Mulai Ujian** | Validasi acuan lalu buka akses; setelah selesai, membuka kembali ujian yang sama |
+| **Validasi Kesiapan Ujian** | Jalankan acuan paket aktif dan simpan hasil kesiapan; akses peserta tetap tertutup |
+| **Mulai Ujian** | Periksa kesiapan tersimpan lalu buka akses; perubahan konfigurasi/dataset memerlukan validasi ulang |
 | **Hentikan Ujian** | Tutup soal/query/submit; pertahankan token dan jawaban |
 | **Hentikan Semua** | Cabut sesi peserta; berbeda dari mengakhiri ujian normal |
 | **Bebaskan Sesi** | Lepas ikatan perangkat dan cabut token lama; jawaban/nilai tetap ada |
@@ -338,6 +339,8 @@ Lihat [SOP pengawas](docs/operations/OPERATIONS_GUIDE.md) dan [kendali sesi](doc
 2. Login memakai NIM dan nama. Tunggu di lobby jika ujian belum aktif.
 3. Setelah ujian dibuka, masuk fullscreen dan pilih paket sesuai arahan pengawas.
 4. Pilih soal dan database, lalu tulis SQL. **Format SQL** merapikan query; **Run Query** atau Ctrl+Enter menjalankan query/seleksi.
+   Tekan **Alt+J** untuk menyisipkan `JOIN … ON …`, lalu tekan lagi setelah mengetik tabel atau alias untuk pindah ke kondisi `ON`.
+   Matikan **Saran otomatis** agar menu saran tidak muncul saat mengetik. **Ctrl+Space** membuka saran secara manual. Pilihan disimpan di browser.
 5. **Submit Answer** mengirim seluruh jawaban editor untuk soal aktif. Submit sandbox dinilai pada workspace evaluator terpisah; gunakan Run Query untuk mengubah workspace percobaan.
 6. Baca status **Tersimpan • Benar/Salah** atau **Menunggu penilaian**. Hasil terbaru dan skor terbaik adalah dua hal berbeda.
 7. Draft lokal membantu saat koneksi putus, tetapi bukan bukti jawaban sudah tersimpan di server. Jika respons hilang, periksa status sebelum mengirim ulang; retry dapat menambah percobaan.
@@ -355,7 +358,7 @@ Sistem menyediakan pembatas akses dan catatan untuk membantu pengawasan. Log bro
 | **Anti-Joki Multi-Account IP**| Beberapa peserta boleh berbagi IP saat `ALLOW_SHARED_IP=true`; penguncian perangkat dan NIM tetap berlaku. |
 | **Isolasi PostgreSQL** | Database master memakai role read-only; sandbox memakai LOGIN tersendiri per mahasiswa dengan hak pada schema sendiri. |
 | **Kebijakan SQL** | Parser AST memeriksa seluruh skrip, jenis perintah, fungsi, dan referensi schema sebelum eksekusi. |
-| **Batas Eksekusi** | Anggaran SQL 5 detik untuk seluruh skrip, maksimal 20 statement, dengan batas hasil dan koneksi sandbox. |
+| **Batas Eksekusi** | Anggaran Run Query 60 detik untuk seluruh skrip, maksimal 20 statement, dengan batas hasil dan koneksi sandbox. |
 | **Pendeteksi Blur Tab** | Jika mahasiswa berpindah jendela/tab browser, sistem otomatis mencatat peringatan dan menghitung frekuensi perpindahan tab di dashboard pengawas. |
 | **Internal Web Dialog** | Konfirmasi keluar menggunakan modal DOM internal web (bukan `window.confirm` bawaan browser) untuk mencegah false-positive deteksi window blur saat mahasiswa menekan tombol keluar ujian. |
 
@@ -382,6 +385,7 @@ Variabel environment berikut dibaca aplikasi. `.env` tidak dimuat otomatis. Port
 | `PG_STUDENT_PASS` | `student123` | Password login master read-only |
 | `EXAM_SQLITE_PATH` | `exam_system.db` di folder proyek | Lokasi SQLite utama; latihan admin terpisah di sampingnya |
 | `PG_POOL_MAXCONN` | `50` | Batas pool per master per proses; bukan jumlah peserta |
+| `EXAM_GRADE_SECONDS` | `60` | Anggaran detik per evaluasi penilaian dan validasi acuan; lebih dari 0, maksimal 60, perlu restart |
 | `PG_SANDBOX_MAXCONN` | `20` | Batas koneksi sandbox pribadi bersamaan per proses |
 | `ALLOW_SHARED_IP` | `true` | Izinkan beberapa peserta pada IP/NAT yang sama |
 | `TRUSTED_PROXY_CIDRS` | *(kosong)* | IP/CIDR proxy tepercaya untuk membaca `X-Forwarded-For` |

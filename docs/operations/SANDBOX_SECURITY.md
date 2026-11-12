@@ -85,7 +85,7 @@ Whitelist melengkapi privilege PostgreSQL; isolasi schema tidak bergantung pada 
 |---|---|
 | Panjang query | 10.000 karakter |
 | Jumlah statement | 20 per permintaan |
-| Anggaran eksekusi | 5 detik untuk seluruh skrip, bukan 5 detik per statement |
+| Anggaran eksekusi Run Query | 60 detik untuk seluruh skrip, bukan 60 detik per statement; berlaku pada IDE mahasiswa dan simulasi admin |
 | Lock timeout | 3 detik |
 | Baris keluaran preview | Maksimal 500 |
 | Kolom keluaran | Maksimal 64 |
