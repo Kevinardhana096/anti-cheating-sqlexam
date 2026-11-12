@@ -354,6 +354,35 @@ function formatQuery() {
 
 // 1. CodeMirror SQL Editor Initialization
 // ==============================================================================
+function insertJoinClause(cm) {
+    if (cm.getOption("readOnly") || cm.somethingSelected() || cm.listSelections().length !== 1) return;
+
+    const cursor = cm.getCursor();
+    const tokenType = cm.getTokenAt(cursor, true).type || "";
+    if (/\b(?:comment|string(?:-\d+)?)\b/.test(tokenType)) return;
+
+    const line = cm.getLine(cursor.line);
+    const before = line.slice(0, cursor.ch);
+    const after = line.slice(cursor.ch);
+    if (/^ ON /i.test(after)) {
+        const joinOrOn = cm.getLineTokens(cursor.line, true).filter(token =>
+            token.end <= cursor.ch && token.type === "keyword" && /^(JOIN|ON)$/i.test(token.string)
+        ).pop();
+        if (joinOrOn && /^JOIN$/i.test(joinOrOn.string)) {
+            if (before.slice(joinOrOn.end).trim()) {
+                cm.setCursor(CodeMirror.Pos(cursor.line, cursor.ch + 4));
+            }
+            return;
+        }
+    }
+
+    const prefix = before && !/\s$/.test(before) ? " " : "";
+    cm.operation(() => {
+        cm.replaceRange(`${prefix}JOIN  ON `, cursor, cursor, "+join");
+        cm.setCursor(CodeMirror.Pos(cursor.line, cursor.ch + prefix.length + 5));
+    });
+}
+
 function initCodeMirror() {
     const textarea = document.getElementById("sql-editor");
     if (!textarea) return;
@@ -370,6 +399,7 @@ function initCodeMirror() {
         lineWrapping: true,
         extraKeys: {
             "Ctrl-Space": "autocomplete",
+            "Alt-J": insertJoinClause,
             "Ctrl-Enter": () => runQuery(),
             "Cmd-Enter": () => runQuery(),
             "Shift-Ctrl-Enter": () => runQuery(true),
@@ -435,8 +465,18 @@ function initCodeMirror() {
         }
     });
 
-    // Auto-trigger completion on typing words
+    const suggestionsToggle = document.getElementById("sql-auto-suggestions");
+    const suggestionsKey = "exam_sql_auto_suggestions";
+    if (suggestionsToggle) {
+        suggestionsToggle.checked = localStorage.getItem(suggestionsKey) !== "off";
+        suggestionsToggle.addEventListener("change", () => {
+            if (!suggestionsToggle.checked) editor.closeHint();
+            localStorage.setItem(suggestionsKey, suggestionsToggle.checked ? "on" : "off");
+        });
+    }
+
     editor.on("inputRead", (cm, change) => {
+        if (suggestionsToggle && !suggestionsToggle.checked) return;
         if (change.origin !== "+input") return;
         const text = change.text[0];
         if (/[a-zA-Z_]/.test(text) && !cm.state.completionActive) {

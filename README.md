@@ -339,6 +339,8 @@ Lihat [SOP pengawas](docs/operations/OPERATIONS_GUIDE.md) dan [kendali sesi](doc
 2. Login memakai NIM dan nama. Tunggu di lobby jika ujian belum aktif.
 3. Setelah ujian dibuka, masuk fullscreen dan pilih paket sesuai arahan pengawas.
 4. Pilih soal dan database, lalu tulis SQL. **Format SQL** merapikan query; **Run Query** atau Ctrl+Enter menjalankan query/seleksi.
+   Tekan **Alt+J** untuk menyisipkan `JOIN … ON …`, lalu tekan lagi setelah mengetik tabel atau alias untuk pindah ke kondisi `ON`.
+   Matikan **Saran otomatis** agar menu saran tidak muncul saat mengetik. **Ctrl+Space** membuka saran secara manual. Pilihan disimpan di browser.
 5. **Submit Answer** mengirim seluruh jawaban editor untuk soal aktif. Submit sandbox dinilai pada workspace evaluator terpisah; gunakan Run Query untuk mengubah workspace percobaan.
 6. Baca status **Tersimpan • Benar/Salah** atau **Menunggu penilaian**. Hasil terbaru dan skor terbaik adalah dua hal berbeda.
 7. Draft lokal membantu saat koneksi putus, tetapi bukan bukti jawaban sudah tersimpan di server. Jika respons hilang, periksa status sebelum mengirim ulang; retry dapat menambah percobaan.

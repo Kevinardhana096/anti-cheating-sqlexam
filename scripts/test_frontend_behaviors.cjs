@@ -69,6 +69,87 @@ test('student DOM initialization registers a defined Format SQL handler', () => 
     assert.doesNotThrow(() => f.state.callbacks.DOMContentLoaded());
     assert.equal(typeof f.nodes['btn-format-sql'].click, 'function');
 });
+test('Alt+J inserts a JOIN scaffold and then moves to its ON condition', () => {
+    const fixture = context('static/js/student.js', {'sql-editor': element()});
+    const mode = require(path.join(root, 'static/vendor/codemirror/addon/runmode/runmode.node.js'));
+    require(path.join(root, 'static/vendor/codemirror/mode/sql/sql.js'));
+    let line = 'SELECT * FROM film AS f';
+    let cursor = {line: 0, ch: line.length};
+    let shortcut;
+    const cm = {
+        on() {}, getOption: () => false, somethingSelected: () => false, listSelections: () => [{}],
+        getCursor: () => cursor, getLine: () => line, setCursor: pos => { cursor = pos; },
+        operation: fn => fn(), replaceRange: (value, from, to) => { line = line.slice(0, from.ch) + value + line.slice(to.ch); },
+        getLineTokens() {
+            const tokens = [];
+            mode.runMode(line, 'text/x-pgsql', (string, type, row, start) => {
+                tokens.push({string, type, start, end: start + string.length});
+            });
+            return tokens;
+        },
+        getTokenAt: pos => cm.getLineTokens().find(token => token.end >= pos.ch) || {}
+    };
+    fixture.ctx.CodeMirror = {Pos: (row, ch) => ({line: row, ch}), fromTextArea: (_, options) => {
+        shortcut = options.extraKeys['Alt-J'];
+        return cm;
+    }};
+    fixture.run('initCodeMirror()');
+    shortcut(cm);
+    assert.equal(line, 'SELECT * FROM film AS f JOIN  ON ');
+    assert.equal(line.slice(cursor.ch), ' ON ');
+    shortcut(cm);
+    assert.equal(line, 'SELECT * FROM film AS f JOIN  ON ');
+
+    const table = 'public.inventory AS i';
+    cm.replaceRange(table, cursor, cursor);
+    cursor = {line: 0, ch: cursor.ch + table.length};
+    shortcut(cm);
+    assert.equal(line, 'SELECT * FROM film AS f JOIN public.inventory AS i ON ');
+    assert.equal(cursor.ch, line.length);
+
+    line = '-- JOIN example ON ';
+    cursor = {line: 0, ch: line.length};
+    shortcut(cm);
+    assert.equal(line, '-- JOIN example ON ');
+});
+test('automatic suggestions can be disabled and stay off when the editor reopens', () => {
+    const toggle = element();
+    const fixture = context('static/js/student.js', {'sql-editor': element(), 'sql-auto-suggestions': toggle});
+    const handlers = {};
+    let suggestions = 0;
+    let closed = 0;
+    let keys;
+    const cm = {
+        state: {},
+        on(name, callback) { handlers[name] = callback; },
+        closeHint() { closed++; }
+    };
+    fixture.ctx.CodeMirror = {
+        fromTextArea(_, options) { keys = options.extraKeys; return cm; },
+        commands: { autocomplete() { suggestions++; } }
+    };
+    const type = () => handlers.inputRead(cm, {origin: '+input', text: ['S']});
+    fixture.run('initCodeMirror()');
+    assert.equal(toggle.checked, true);
+    type();
+    assert.equal(suggestions, 1);
+
+    toggle.checked = false;
+    toggle.change();
+    assert.equal(closed, 1);
+    fixture.run('initCodeMirror()');
+    assert.equal(toggle.checked, false);
+    type();
+    assert.equal(suggestions, 1);
+    assert.equal(keys['Ctrl-Space'], 'autocomplete');
+    assert.equal(typeof keys['Alt-J'], 'function');
+
+    toggle.checked = true;
+    toggle.change();
+    type();
+    assert.equal(suggestions, 2);
+});
+
 test('formatter preserves PostgreSQL literals, quoted identifiers, comments and undo', () => {
     const source = '-- select literal\nselect \'from select\', $tag$from SELECT$tag$, "CaseSensitive", 1.2300 from t where id=1;';
     const f = student(source); f.run('formatQuery()');
